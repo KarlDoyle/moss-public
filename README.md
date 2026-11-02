@@ -6,7 +6,7 @@
 
 Moss is an experimental CLI for explicit provider routing, usage/cost visibility, bounded context and human-reviewed changes. Its task-based session workflows select from configured local and hosted lanes; some standalone commands still use an older router (see [routing limits](LIMITATIONS.md#models-and-routing)).
 
-The aim is not to build an autonomous agent. Moss uses fixed workflows: it makes the routing decision visible, prepares bounded context, and requires a person to approve changes before they are applied.
+Moss uses fixed workflows with visible routing, bounded context and approval before applying edits.
 
 Maintained by [Karl Doyle](https://github.com/KarlDoyle). Source: [github.com/KarlDoyle/moss-public](https://github.com/KarlDoyle/moss-public).
 
@@ -43,12 +43,6 @@ Moss uses fixed workflows rather than open-ended model autonomy:
 
 The daily cap applies to Anthropic Messages API requests selected through the task-policy router: default chat, its hosted edit planning/diff calls, and external-workspace skill runs. Before selection it compares today's local ledger estimate plus an estimated input/output allowance with the cap. It is not a provider billing limit: older `ask`/legacy chat routes, Claude Code calls/probes, other applications, concurrent requests and missing ledger entries are outside that accounting. EUR uses list prices and a dated exchange rate, not actual provider charges. See [limitations](LIMITATIONS.md).
 
-## How it fits together
-
-Moss brings provider selection, context handling and application-level safety checks into a terminal workflow. Local model execution is handled through Ollama; hosted calls use the configured Claude lane. For local editing, Aider can produce the change; on a Claude lane, Moss receives a proposed unified diff. In either case, the change is reviewed before application.
-
-The workflow is deliberately fixed and inspectable. Model output is treated as a proposal to evaluate, not as an authoritative record or permission to take the next action.
-
 ## Quick start
 
 Moss currently runs from a source checkout; it is not distributed as a prebuilt global package. Requires Node.js 24 or later and pnpm 10 or later. Ollama and the configured local model are needed for local execution.
@@ -66,7 +60,7 @@ TAISCE_ROOT=/tmp/moss-public-no-workspace MOSS_NO_OLLAMA_LIFECYCLE=1 \
 
 Use the pinned pnpm version in `package.json`. The examples use a POSIX shell; macOS-specific lifecycle, Keychain and operator integrations are optional, not portable setup steps. Install/start Ollama and pull the configured model before local generation; Moss never pulls models automatically. See [First run](docs/FIRST_RUN.md) for a provider-pinned request and the distinction between inspection and dispatch.
 
-![Actual local route preview selecting Ollama and llama3.1:latest](docs/assets/route-preview.svg)
+![Actual local route preview selecting Ollama and llama3.1:latest](docs/assets/route-preview.png)
 
 Route inspection captured from this checkout on 2 November 2026 using the command above. The external workspace was disabled with an absent temporary path; the local daemon was already running. Output is wrapped for display; no omissions or redactions. This is not model-quality, security or cost-savings evidence; €0 means no per-call provider charge.
 
@@ -91,13 +85,9 @@ The current CLI registers these commands:
 
 Start with chat, pinned `ask`, route inspection and built-in diff reviews. `run` also discovers skills in a separately configured Taisce workspace; those skills are not bundled here. `local`/`off`, `check` and the tier helpers are specialist operator integrations. Models/auth, plans, LiteLLM/MCP tools, documents and memory commands are parked outside default help; retained registration does not make them the supported portfolio workflow. Run `moss help --all` for the full surface.
 
-## Scope and status
+## Fit and status
 
-**Status: Experimental; not release-ready.**
-
-Moss is an **experimental local AI orchestration project**. Its current focus is provider routing, cost and usage visibility, controlled context, and explicit execution boundaries.
-
-It is not presented as a general-purpose autonomous agent or a finished enterprise platform. Some earlier document, memory and optional integration capabilities remain in the repository but are outside the current development focus.
+**Experimental; not release-ready.** Use Moss to inspect routes, run bounded prompts/diff reviews and review fixed edit workflows. It is not an autonomous agent, retrieval system or finished platform. Earlier document, memory and integration commands remain parked outside the current focus.
 
 ## Testing
 

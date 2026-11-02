@@ -45,7 +45,7 @@ TAISCE_ROOT=/tmp/moss-public-no-workspace MOSS_NO_OLLAMA_LIFECYCLE=1 \
 
 Choose an absent temporary directory for `TAISCE_ROOT`: this disables optional external workspace hooks for this example. The global preview selects only the configured `brief` lane (Ollama) here, reads its local model list, and returns before dispatch. It does not start Ollama or pull a model. If no suitable model is available, it reports no route; this is not a generated answer.
 
-The [captured preview](assets/route-preview.svg) shows lane, model and rationale. Global `--explain ask` previews task-policy routing used by the default session; standalone `ask` still uses an older router. To inspect the latter without hosted probing, use:
+The [captured preview](assets/route-preview.png) shows lane, model and rationale. Global `--explain ask` previews task-policy routing used by the default session; standalone `ask` still uses an older router. To inspect the latter without hosted probing, use:
 
 ```bash
 pnpm exec tsx ./src/cli.ts ask --provider ollama --explain
