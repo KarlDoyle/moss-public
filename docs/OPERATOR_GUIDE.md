@@ -1,10 +1,12 @@
 # Moss operator guide
 
-Moss is a local-first CLI with a small command surface that stays inside the project, prefers local provider lanes, and records memory only when you ask it to.
+Moss is an experimental local-first CLI for explicit routing and bounded workflows. Hosted routes send supplied context off-machine; optional workspace integrations and telemetry can operate outside this checkout. Memory is opt-in.
 
-Examples below use the installed `moss` command. Running from source, prefix with `pnpm cli --` (e.g. `pnpm cli -- doctor`).
+Examples below use the installed `moss` command. Running from source, replace `moss` with `pnpm exec tsx ./src/cli.ts` (e.g. `pnpm exec tsx ./src/cli.ts doctor`).
 
 ## Command surface
+
+Start with chat, provider-pinned `ask`, route inspection and the bundled `code-review`/`security-review` diff workflows. `run council` and other Taisce skills need a separate workspace; they are not bundled here. The list below also includes specialist machine/tier helpers and parked document/memory commands, not a promise that every command is ready on a fresh checkout.
 
 ```bash
 moss doctor
@@ -20,9 +22,9 @@ moss cost
 moss bench
 moss auth
 moss models
-moss ask "Your prompt"
-moss ask --explain
-moss ask --context-file docs/OPERATOR_GUIDE.md "What can Moss do?"
+moss ask --provider ollama --model llama3.1:latest "Your prompt"
+moss ask --provider ollama --explain
+moss ask --provider ollama --model llama3.1:latest --context-file docs/OPERATOR_GUIDE.md "What can Moss do?"
 moss inventory --check
 moss inventory
 moss convert --all
@@ -39,29 +41,31 @@ The complete command names are `chat`, `run`, `ask`, `status`, `local`,
 
 ## Provider status
 
-`moss auth` and `moss ask --explain` share the same readiness language:
+`moss auth` and provider-level `ask --explain` use the following readiness language. Probing Claude Code can make a real hosted call; “preview” means no requested generation, not necessarily offline:
 
 - `ollama` — generation-ready when the local daemon and a model are usable. €0.
-- `claude-code` — generation-ready when `claude` is on PATH and logged in (a 1-token probe, cached 15 minutes). Billed to the subscription.
-- `anthropic-api` — generation-ready when an API key is in the macOS Keychain (or exported by `moss api`). Metered, capped per day in `config/routing.yaml`.
+- `claude-code` — generation-ready when `claude` is on PATH and logged in (a short hosted probe, cached 15 minutes). Uses the CLI account/plan; not covered by the API cap.
+- `anthropic-api` — key-present when `ANTHROPIC_API_KEY` or macOS Keychain supplies a key; validity and credit are only established on dispatch. Metered; task-policy calls alone consult the enable switch and daily estimated budget in `config/routing.yaml`.
 - `cursor-manual` — manual handoff: Moss prepares a packet, another tool runs it.
 - `litellm` — not configured unless you point it at a localhost endpoint.
 
-Which lane a command uses is decided per task by `config/routing.yaml`; `moss --explain <command>` shows the pick and why, and `moss cost` shows the spend.
+Default chat and Taisce skills select the first usable lane per task in `config/routing.yaml`; after dispatch they report failures rather than trying another lane. Global `--explain` inspects this policy. Standalone `ask` and legacy chat `/provider` or `/context` use an older provider-order router with retryable fallback and no task-policy API cap. `ask --explain` inspects that older router, without resolving its model; a global ask preview does not describe its dispatch. `moss cost` reads the task-policy ledger, not every call. See [routing and accounting limits](../LIMITATIONS.md).
+
+`models`, `auth`, `skills`, `plan`, `litellm`, `tools`, `inventory`, `context`, `convert`, `remember`, `recall`, `compact` and `forget` are parked outside default help. Tier helpers (`api`, `sub`, `credits`) rely on account settings or companion shell functions. `local`/`off` manage macOS Ollama lifecycle. `check` targets machine/workspace integrations and can query registries; `--deep` can inspect other checkouts and `--report` writes a workspace report. Do not treat it as a project-only quality gate.
 
 ## Explicit context
 
 Use `--context-file` for one known project document:
 
 ```bash
-moss ask --context-file docs/OPERATOR_GUIDE.md "Summarise the current Moss safety boundary."
+moss ask --provider ollama --model llama3.1:latest --context-file docs/OPERATOR_GUIDE.md "Summarise the current Moss safety boundary."
 ```
 
 This is not RAG. Moss does not search folders, rank documents, or infer what to load — you choose the file. It must be a regular markdown/text file inside the project root, ≤64 KiB.
 
 ## Documents
 
-The document flow is safe by default: it only reads the configured approved folder.
+The parked document flow is off by default and reads one configured approved folder when enabled. Its scope checks are application controls; review outputs before sharing.
 
 ```bash
 moss inventory --check --json
@@ -86,15 +90,21 @@ Recall is substring/tag search only — there is no semantic memory.
 
 ## Interactive session
 
-`moss chat` opens a persistent local-first session over the same `ask` pipeline:
+`moss chat` opens an in-memory session over task-policy routing by default:
 
 ```bash
 moss chat
 moss chat --model qwen3:4b --provider ollama
 ```
 
-Type a prompt for a turn, or use a slash command: `/help`, `/model`, `/provider`, `/status`, `/clear`, `/exit`. Multi-turn context is carried but **bounded and visible** — the rolling transcript is capped and oldest turns drop off (`/status` shows the size). The session is read-only, routes deterministically like `ask`, and keeps state in memory only. Non-interactive use works too: `printf '/help\n/exit\n' | moss chat`.
+Type a prompt for a turn, or use a slash command: `/help`, `/model`, `/provider`, `/status`, `/clear`, `/exit`. Multi-turn context is carried but **bounded and visible** — the rolling transcript is capped and oldest turns drop off (`/status` shows the size). Ordinary turns produce text and keep session history in memory. `/edit` can modify files after approval; usage metadata can be written to disk. `/model` shows task-policy routes; `/provider` or `/context` switches generation to the older ask path. It is not a read-only session as a whole. Non-interactive use works too: `printf '/help\n/exit\n' | moss chat`.
+
+## Reviewed edits
+
+`/edit <request>` proposes a plan for tracked files in the selected repository. On a Claude lane it displays a unified diff, refuses parsed paths outside the plan, checks clean application, and asks `go? [y/N]` before applying. On the local lane, Aider dry-runs first, then approval starts a **second generation** which can differ. Read the resulting `git diff`; neither flow commits. Aider must be installed separately for local edits.
+
+Recognised irreversible/external-facing gates make output stage-only. They depend on an optional workspace hook and suppress application, not model dispatch. Approval is for applying changes, not a confirmation before every hosted request. See [boundary limits](../LIMITATIONS.md#approval-and-execution-boundaries).
 
 ## Choosing the right tool
 
-Use Moss when the work should stay local, explicit, bounded, and repeatable. Use Codex or Cursor when you want a coding agent to edit files. Use ChatGPT for broader reasoning outside the project boundary. Moss produces manual handoff packets but never silently runs those tools.
+Use Moss to inspect explicit routes, run a bounded prompt or diff review, or review a fixed edit workflow. Choose and pin Ollama when work must stay local. It is not an autonomous agent, retrieval system, finished platform or universal provider abstraction. Manual handoff packets still require you to act in the receiving tool. For broader coding-agent workflows, use a dedicated coding agent.
