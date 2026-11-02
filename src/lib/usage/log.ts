@@ -2,6 +2,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { MOSS_VERSION } from "../../version.ts";
 import { type LaneUsage, recordLaneUsage } from "../lanes/ledger.ts";
+import { loadRoutingPolicy } from "../lanes/policy.ts";
 import { listPriceUsd, PROVIDER_METADATA } from "../providers/metadata.ts";
 import type { ProviderId } from "../providers/types.ts";
 import { usageLogPath } from "./paths.ts";
@@ -11,6 +12,7 @@ export interface UsageLogDeps {
   readonly appendFile: (path: string, data: string) => Promise<void>;
   readonly now: () => Date;
   readonly mossVersion: string;
+  readonly usdToEur?: () => number;
   // Also append the call to Taisce's lane-usage ledger (unified router, 2026-09-18), so the
   // pre-router paths (`moss ask`, room skills, a /provider-pinned session) are counted too.
   // Only the default deps set it; a test's own deps never write to the ledger.
@@ -24,16 +26,30 @@ export const defaultUsageLogDeps: UsageLogDeps = {
   },
   now: () => new Date(),
   mossVersion: MOSS_VERSION,
+  usdToEur: () => loadRoutingPolicy().fx.usd_to_eur,
   recordLane: (entry) => recordLaneUsage(entry),
 };
 
-function laneEntry(input: UsageWriteInput, ts: string): Omit<LaneUsage, "by"> {
-  const known = input.providerId in PROVIDER_METADATA;
-  const billing = known ? PROVIDER_METADATA[input.providerId as ProviderId].billing : "local";
+function laneEntry(input: UsageWriteInput, ts: string, deps: UsageLogDeps): Omit<LaneUsage, "by"> {
+  const known = Object.hasOwn(PROVIDER_METADATA, input.providerId);
+  const billing = known ? PROVIDER_METADATA[input.providerId as ProviderId].billing : "unknown";
   const usd =
-    input.inputTokens !== undefined && input.outputTokens !== undefined
-      ? listPriceUsd(input.model, input.inputTokens, input.outputTokens)
-      : undefined;
+    input.costUsd !== undefined
+      ? Number.isFinite(input.costUsd) && input.costUsd >= 0
+        ? input.costUsd
+        : undefined
+      : input.inputTokens !== undefined && input.outputTokens !== undefined
+        ? listPriceUsd(input.model, input.inputTokens, input.outputTokens)
+        : undefined;
+  let eur: number | undefined;
+  if (billing === "eur" && usd !== undefined) {
+    try {
+      const fx = deps.usdToEur?.();
+      if (fx !== undefined && Number.isFinite(fx) && fx > 0) eur = usd * fx;
+    } catch {
+      /* metadata still records unknown cost */
+    }
+  }
   return {
     ts,
     lane: input.providerId,
@@ -43,6 +59,7 @@ function laneEntry(input: UsageWriteInput, ts: string): Omit<LaneUsage, "by"> {
     ...(input.inputTokens !== undefined ? { tokens_in: input.inputTokens } : {}),
     ...(input.outputTokens !== undefined ? { tokens_out: input.outputTokens } : {}),
     cost: billing,
+    ...(eur !== undefined ? { eur } : {}),
     ...(billing === "sub" && usd !== undefined ? { usd_list: usd } : {}),
   };
 }
@@ -56,6 +73,7 @@ export interface UsageWriteInput {
   readonly inputTokens?: number;
   readonly outputTokens?: number;
   readonly durationMs?: number;
+  readonly costUsd?: number;
 }
 
 // Append one validated usage record to output/usage/usage.jsonl.
@@ -86,19 +104,31 @@ export async function writeUsageEntry(
 }
 
 // Best-effort variant for hot paths (e.g. `moss ask`): usage logging is
-// an audit side-effect and must never fail or slow the operator's
-// actual request. Swallows any write/validation error and reports
+// an audit side-effect and must never fail the operator's
+// actual request. Reports write/validation errors and reports
 // whether the line was recorded, so callers can stay silent on success
 // and need no try/catch of their own.
 export async function recordUsageBestEffort(
   input: UsageWriteInput,
   deps: UsageLogDeps = defaultUsageLogDeps,
 ): Promise<boolean> {
+  let logOk = false;
+  let ledgerOk = deps.recordLane === undefined;
+  // Separate attempts: a secondary log failure must not suppress the ledger.
   try {
-    const entry = await writeUsageEntry(input, deps);
-    await deps.recordLane?.(laneEntry(input, entry.timestamp));
-    return true;
+    await writeUsageEntry(input, deps);
+    logOk = true;
   } catch {
-    return false;
+    /* reported by return value */
   }
+  if (deps.recordLane !== undefined) {
+    try {
+      const entry = laneEntry(input, deps.now().toISOString(), deps);
+      ledgerOk = await deps.recordLane(entry);
+      if (entry.cost === "eur" && entry.eur === undefined) ledgerOk = false;
+    } catch {
+      ledgerOk = false;
+    }
+  }
+  return logOk && ledgerOk;
 }

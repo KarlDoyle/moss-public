@@ -78,7 +78,7 @@ export function buildCli(options: BuildCliOptions = {}): Command {
     // never shadow a subcommand's own --explain (ask, models). Listed here for --help only.
     .addHelpText(
       "after",
-      '\n--explain on any command (moss run council "…" --explain): the lane, model, why and estimated cost — nothing runs',
+      '\n--explain on any command (moss run council "…" --explain): the lane, model, why and estimated cost — skips requested generation; probes/hooks may run',
     )
     .showHelpAfterError(true)
     .configureOutput({
@@ -172,14 +172,27 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
   // `moss --explain <command …>`: explain the route of any command and run nothing.
   const explained = globalExplainArgs(argv.slice(2));
-  if (explained !== null) {
+  let commandIndex = 0;
+  while (explained?.[commandIndex] === "--json") commandIndex++;
+  const askPreview = explained !== null && explained[commandIndex] === "ask";
+  if (explained !== null && !askPreview) {
     return explainInvocation(
       explained,
       (line) => process.stdout.write(`${line}\n`),
       (line) => process.stderr.write(`${line}\n`),
     );
   }
-  const rest = argv.slice(2);
+  // Global ask preview uses the same Commander parser/action as standalone ask.
+  const invocation =
+    askPreview && explained !== null
+      ? [
+          ...argv.slice(0, 2),
+          ...explained.slice(0, commandIndex + 1),
+          "--explain",
+          ...explained.slice(commandIndex + 1),
+        ]
+      : argv;
+  const rest = invocation.slice(2);
   const showAll = rest.includes("--all") && (rest[0] === "help" || rest.includes("--help"));
   const program = buildCli({ showAll });
   if (showAll && rest[0] === "help") {
@@ -187,7 +200,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     return 0;
   }
   try {
-    await program.parseAsync([...argv]);
+    await program.parseAsync([...invocation]);
     const code = process.exitCode;
     if (typeof code === "number") return code;
     if (typeof code === "string") {

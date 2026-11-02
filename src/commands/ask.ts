@@ -125,7 +125,7 @@ export interface AskCommandOptions {
   // writer; unit tests inject a spy. Left undefined → no usage is
   // recorded, which keeps library callers and existing tests
   // side-effect-free. See docs/DECISIONS.md D-0019.
-  readonly recordUsage?: (input: UsageWriteInput) => Promise<void>;
+  readonly recordUsage?: (input: UsageWriteInput) => Promise<boolean> | Promise<void>;
   // The `command` label written to the usage log. Defaults to `"ask"`.
   // The interactive session reuses this whole path but must log
   // `"chat"` so a chat turn never masquerades as an ask. See D-0020.
@@ -138,6 +138,7 @@ export interface AskCommandResult {
   readonly response?: string;
   readonly contextFile?: AskContextFileMetadata;
   readonly error?: string;
+  readonly warnings?: readonly string[];
 }
 
 function hasTraversalSegment(input: string): boolean {
@@ -253,35 +254,7 @@ export async function runAskCommand(options: AskCommandOptions): Promise<AskComm
   const routerDeps = buildRouterDeps(options);
   const task: TaskId = options.task ?? "ask";
 
-  // --explain short-circuits before any prompt/model resolution. The
-  // operator's intent is to preview the routing decision, not to send
-  // a prompt; refusing on empty prompt would be hostile to that flow.
-  if (options.explain === true) {
-    try {
-      const explanation = await explainProviderRoute(task, routerDeps);
-      if (options.emitJson) {
-        const body = formatRouteExplanationJson(explanation);
-        options.out(JSON.stringify({ ok: true, mode: "explain", ...body }, null, 2));
-      } else {
-        options.out(
-          formatRouteExplanationHuman(explanation, {
-            heading: "moss ask — route preview",
-          }),
-        );
-      }
-      return { ok: true };
-    } catch (error) {
-      if (error instanceof NetworkBoundaryError) {
-        options.err(`moss ask: ${error.message}`);
-        return { ok: false, error: error.message };
-      }
-      const message = error instanceof Error ? error.message : String(error);
-      options.err(`moss ask: could not build route explanation: ${message}`);
-      return { ok: false, error: message };
-    }
-  }
-
-  if (options.prompt.trim().length === 0) {
+  if (options.explain !== true && options.prompt.trim().length === 0) {
     options.err("moss ask: prompt must not be empty.");
     return { ok: false, error: "empty prompt" };
   }
@@ -369,34 +342,72 @@ export async function runAskCommand(options: AskCommandOptions): Promise<AskComm
     }
   }
 
+  const request = {
+    task,
+    prompt,
+    ...(modelName !== undefined ? { model: modelName } : {}),
+    modelIsDefault: options.model === undefined,
+    ...(options.provider !== undefined ? { provider: options.provider } : {}),
+    ...(options.system !== undefined ? { system: options.system } : {}),
+    ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
+  };
+  // Preview uses the same resolved context, model and request constraints.
+  // It accepts an empty prompt and performs availability probes, not the
+  // requested generation.
+  if (options.explain === true) {
+    try {
+      const explanation = await explainProviderRoute(task, routerDeps, request);
+      if (options.emitJson) {
+        const body = formatRouteExplanationJson(explanation);
+        options.out(JSON.stringify({ ok: true, mode: "explain", ...body }, null, 2));
+      } else {
+        options.out(
+          formatRouteExplanationHuman(explanation, {
+            heading: "moss ask — route preview",
+          }),
+        );
+      }
+      return { ok: true };
+    } catch (error) {
+      if (error instanceof NetworkBoundaryError) {
+        options.err(`moss ask: ${error.message}`);
+        return { ok: false, error: error.message };
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      options.err(`moss ask: could not build route explanation: ${message}`);
+      return { ok: false, error: message };
+    }
+  }
+
   try {
-    const { result } = await routeAndGenerate(
-      task,
-      {
-        task,
-        prompt,
-        ...(modelName !== undefined ? { model: modelName } : {}),
-        ...(options.system !== undefined ? { system: options.system } : {}),
-        ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
-      },
-      routerDeps,
-    );
+    const { result } = await routeAndGenerate(task, request, routerDeps);
+    const warnings = [...(result.warnings ?? [])];
     // Record one usage line per real generation. Handoff lanes did not
     // execute the task here (the operator does, elsewhere) so they carry
     // no token usage and are skipped. Logging is best-effort and must
     // never alter the command's outcome — the seam swallows its own
     // errors. See D-0019.
     if (result.handoff === undefined && options.recordUsage !== undefined) {
-      await options.recordUsage({
-        command: options.usageCommand ?? "ask",
-        providerId: result.providerId,
-        model: result.model,
-        task,
-        ...(result.inputTokens !== undefined ? { inputTokens: result.inputTokens } : {}),
-        ...(result.outputTokens !== undefined ? { outputTokens: result.outputTokens } : {}),
-        ...(result.durationMs !== undefined ? { durationMs: result.durationMs } : {}),
-      });
+      try {
+        const recorded = await options.recordUsage({
+          command: options.usageCommand ?? "ask",
+          providerId: result.providerId,
+          model: result.model,
+          task,
+          ...(result.inputTokens !== undefined ? { inputTokens: result.inputTokens } : {}),
+          ...(result.outputTokens !== undefined ? { outputTokens: result.outputTokens } : {}),
+          ...(result.durationMs !== undefined ? { durationMs: result.durationMs } : {}),
+          ...(result.costUsd !== undefined ? { costUsd: result.costUsd } : {}),
+        });
+        if (recorded === false)
+          warnings.push(
+            "Accounting incomplete: usage/ledger recording or cost data is incomplete.",
+          );
+      } catch {
+        warnings.push("Accounting incomplete: usage/ledger recording or cost data is incomplete.");
+      }
     }
+    for (const warning of warnings) options.err(warning);
     if (options.emitJson) {
       // Handoff lanes return a structured packet; emit it as the
       // top-level JSON shape so callers can act on the packet
@@ -414,6 +425,7 @@ export async function runAskCommand(options: AskCommandOptions): Promise<AskComm
               ...(contextFile !== undefined ? { contextFile } : {}),
               handoff: result.handoff,
               response: result.response,
+              ...(warnings.length > 0 ? { warnings } : {}),
             },
             null,
             2,
@@ -427,6 +439,7 @@ export async function runAskCommand(options: AskCommandOptions): Promise<AskComm
               model: result.model,
               ...(contextFile !== undefined ? { contextFile } : {}),
               response: result.response,
+              ...(warnings.length > 0 ? { warnings } : {}),
             },
             null,
             2,
@@ -440,6 +453,7 @@ export async function runAskCommand(options: AskCommandOptions): Promise<AskComm
       ok: true,
       model: result.model,
       response: result.response,
+      ...(warnings.length > 0 ? { warnings } : {}),
       ...(contextFile !== undefined ? { contextFile } : {}),
     };
   } catch (error) {
@@ -484,8 +498,8 @@ export function registerAsk(program: Command): void {
     // Prompt is optional so `moss ask --explain` can run without one;
     // the command itself rejects an empty prompt in non-explain mode.
     .argument("[prompt]", "Prompt to send")
-    .description("One-off prompt to the local model (--explain previews the route, nothing sent)")
-    .option("--model <name>", "Override the registry-selected model")
+    .description("One-off routed prompt (--explain skips requested generation; probes may run)")
+    .option("--model <name>", "Pin a model (native lane unless --provider is also given)")
     .option("--system <text>", "System prompt prepended to the model")
     .option("--temperature <value>", "Sampling temperature (0..2)", parseTemperature)
     .option("--task <task>", "Task id to route (closed union)", parseTask)
@@ -518,7 +532,7 @@ export function registerAsk(program: Command): void {
           emitJson: Boolean(commandOpts.json) || Boolean(globalOpts.json),
           out: (line) => process.stdout.write(`${line}\n`),
           err: (line) => process.stderr.write(`${line}\n`),
-          recordUsage: (input) => recordUsageBestEffort(input).then(() => undefined),
+          recordUsage: (input) => recordUsageBestEffort(input),
         };
         if (commandOpts.model !== undefined) Object.assign(options, { model: commandOpts.model });
         if (commandOpts.system !== undefined)

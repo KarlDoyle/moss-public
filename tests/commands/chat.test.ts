@@ -87,7 +87,7 @@ describe("runChatSession", () => {
     const explainRoute = vi.fn(async (provider: ProviderId | undefined) => `ROUTE for ${provider}`);
     const h = harness(["/provider ollama", "/lanes", "/exit"], echo, { explainRoute });
     await runChatSession(h.deps);
-    expect(explainRoute).toHaveBeenCalledWith("ollama");
+    expect(explainRoute).toHaveBeenCalledWith("ollama", undefined);
     expect(h.out.join("\n")).toContain("ROUTE for ollama");
     // Read-only: no model turn was executed.
     expect(h.generate).not.toHaveBeenCalled();
@@ -97,7 +97,7 @@ describe("runChatSession", () => {
     const explainRoute = vi.fn(async () => "AUTO ROUTE");
     const h = harness(["/lanes", "/exit"], echo, { explainRoute });
     await runChatSession(h.deps);
-    expect(explainRoute).toHaveBeenCalledWith(undefined);
+    expect(explainRoute).toHaveBeenCalledWith(undefined, undefined);
     expect(h.out.join("\n")).toContain("AUTO ROUTE");
   });
 

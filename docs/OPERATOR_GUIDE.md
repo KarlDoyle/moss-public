@@ -23,7 +23,7 @@ moss bench
 moss auth
 moss models
 moss ask --provider ollama --model llama3.1:latest "Your prompt"
-moss ask --provider ollama --explain
+moss ask --provider ollama --model llama3.1:latest --explain
 moss ask --provider ollama --model llama3.1:latest --context-file docs/OPERATOR_GUIDE.md "What can Moss do?"
 moss inventory --check
 moss inventory
@@ -45,11 +45,11 @@ The complete command names are `chat`, `run`, `ask`, `status`, `local`,
 
 - `ollama` — generation-ready when the local daemon and a model are usable. €0.
 - `claude-code` — generation-ready when `claude` is on PATH and logged in (a short hosted probe, cached 15 minutes). Uses the CLI account/plan; not covered by the API cap.
-- `anthropic-api` — key-present when `ANTHROPIC_API_KEY` or macOS Keychain supplies a key; validity and credit are only established on dispatch. Metered; task-policy calls alone consult the enable switch and daily estimated budget in `config/routing.yaml`.
+- `anthropic-api` — key-present when `ANTHROPIC_API_KEY` or macOS Keychain supplies a key; validity and credit are only established on dispatch. Metered; both routing engines consult the enable switch and advisory daily estimated budget in `config/routing.yaml`.
 - `cursor-manual` — manual handoff: Moss prepares a packet, another tool runs it.
 - `litellm` — not configured unless you point it at a localhost endpoint.
 
-Default chat and Taisce skills select the first usable lane per task in `config/routing.yaml`; after dispatch they report failures rather than trying another lane. Global `--explain` inspects this policy. Standalone `ask` and legacy chat `/provider` or `/context` use an older provider-order router with retryable fallback and no task-policy API cap. `ask --explain` inspects that older router, without resolving its model; a global ask preview does not describe its dispatch. `moss cost` reads the task-policy ledger, not every call. See [routing and accounting limits](../LIMITATIONS.md).
+Default chat and external-workspace skills select by task-policy lane order; standalone asks and context-profile/optional-provider chat retain provider-order fallback. Both enforce explicit provider/model constraints and API eligibility. Global and standalone ask previews parse and resolve the same request, including its model and eligible fallback list. Registry defaults can admit hosted fallback; explicit local pins cannot. Bundled reviews are Ollama-only. `moss cost` shows recorded usage across both routing paths, flags incomplete accounting and keeps unknown totals explicit. See [routing and accounting limits](../LIMITATIONS.md).
 
 `models`, `auth`, `skills`, `plan`, `litellm`, `tools`, `inventory`, `context`, `convert`, `remember`, `recall`, `compact` and `forget` are parked outside default help. Tier helpers (`api`, `sub`, `credits`) rely on account settings or companion shell functions. `local`/`off` manage macOS Ollama lifecycle. `check` targets machine/workspace integrations and can query registries; `--deep` can inspect other checkouts and `--report` writes a workspace report. Do not treat it as a project-only quality gate.
 
@@ -97,7 +97,7 @@ moss chat
 moss chat --model qwen3:4b --provider ollama
 ```
 
-Type a prompt for a turn, or use a slash command: `/help`, `/model`, `/provider`, `/status`, `/clear`, `/exit`. Multi-turn context is carried but **bounded and visible** — the rolling transcript is capped and oldest turns drop off (`/status` shows the size). Ordinary turns produce text and keep session history in memory. `/edit` can modify files after approval; usage metadata can be written to disk. `/model` shows task-policy routes; `/provider` or `/context` switches generation to the older ask path. It is not a read-only session as a whole. Non-interactive use works too: `printf '/help\n/exit\n' | moss chat`.
+Type a prompt for a turn, or use a slash command: `/help`, `/model`, `/provider`, `/status`, `/clear`, `/exit`. Multi-turn context is carried but **bounded and visible** — the rolling transcript is capped and oldest turns drop off (`/status` shows the size). Ordinary turns produce text and keep session history in memory. `/edit` can modify files after approval; usage metadata can be written to disk. `/model` shows task-policy routes; `/provider` constrains all session/edit requests; `/context` retains the ask-based profile path under the same pin and API checks. Optional manual/proxy providers also retain that path. It is not a read-only session as a whole. Non-interactive use works too: `printf '/help\n/exit\n' | moss chat`.
 
 ## Reviewed edits
 

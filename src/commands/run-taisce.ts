@@ -31,6 +31,7 @@ export interface TaisceRunOptions {
 export interface TaisceRunDeps {
   readonly policy: () => RoutingPolicy;
   readonly select: () => SelectDeps;
+  readonly previewSelect?: () => SelectDeps;
   readonly plan: SkillPlanDeps;
   readonly dispatch: (
     policy: RoutingPolicy,
@@ -44,6 +45,7 @@ export interface TaisceRunDeps {
 export const defaultTaisceRunDeps: TaisceRunDeps = {
   policy: () => loadRoutingPolicy(),
   select: () => defaultSelectDeps(undefined, { autoStartOllama: true }),
+  previewSelect: () => defaultSelectDeps(),
   plan: defaultSkillPlanDeps,
   dispatch: (policy, choice, prompt) => dispatchChoice(policy, choice, { prompt, command: "run" }),
   afterRun: async () => (ollamaUse.started ? (await turnOffOllama()).message : null),
@@ -58,8 +60,10 @@ export async function runTaisceSkill(
   try {
     return await runRouted(options, deps);
   } finally {
-    const off = await deps.afterRun?.();
-    if (off) options.err(`· ${off}`);
+    if (!options.explainOnly) {
+      const off = await deps.afterRun?.();
+      if (off) options.err(`· ${off}`);
+    }
   }
 }
 
@@ -94,7 +98,7 @@ async function runRouted(
       promptTokens: plan.promptTokens,
       ...pinForModel(options.model),
     },
-    deps.select(),
+    options.explainOnly ? (deps.previewSelect ?? deps.select)() : deps.select(),
   );
   const explained = renderLaneChoice(
     choice,
@@ -102,7 +106,9 @@ async function runRouted(
     `Taisce skill '${plan.skill.id}'`,
   );
   if (options.explainOnly === true) {
-    options.out(`${explained}\n  nothing was run (--explain).`);
+    options.out(
+      `${explained}\n  no requested generation (--explain); availability probes and configured hooks may run.`,
+    );
     return choice.lane !== null;
   }
   if (choice.lane === null) {
@@ -121,8 +127,9 @@ async function runRouted(
     );
     return false;
   }
+  for (const warning of result.warnings ?? []) options.err(warning);
   const stage = choice.stageOnly
-    ? `STAGE-ONLY (gate: ${choice.gates.join(" + ")}) — nothing was sent or applied`
+    ? `STAGE-ONLY (gate: ${choice.gates.join(" + ")}) — model input was dispatched; output shown without applying the proposed action`
     : undefined;
   if (options.emitJson) {
     options.out(
@@ -137,6 +144,7 @@ async function runRouted(
           model: result.model,
           stageOnly: choice.stageOnly,
           response: result.response,
+          ...(result.warnings !== undefined ? { warnings: result.warnings } : {}),
         },
         null,
         2,

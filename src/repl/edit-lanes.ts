@@ -46,6 +46,7 @@ export async function claudeLane(
     `· ${route.lane} preparing a unified diff with ${route.model} (patch text stays in memory)…`,
   );
   const made = await edit.claudeDiff(repo, plan, files, route);
+  for (const warning of made.warnings ?? []) ctx.err(warning);
   if (!made.ok || made.diff === undefined || made.diff.trim().length === 0) {
     ctx.err(
       `/edit: no diff from ${route.lane}: ${made.error ?? "empty reply"}. Nothing was applied.`,

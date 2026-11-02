@@ -126,20 +126,28 @@ export function createAnthropicApiProvider(
       .filter((b) => b.type === "text")
       .map((b) => b.text ?? "")
       .join("");
-    const u = parsed.usage ?? {};
-    const inputTokens =
-      (u.input_tokens ?? 0) +
-      (u.cache_read_input_tokens ?? 0) +
-      (u.cache_creation_input_tokens ?? 0);
-    const outputTokens = u.output_tokens ?? 0;
-    const costUsd = listPriceUsd(model, inputTokens, outputTokens);
+    const u = parsed.usage;
+    const count = (n: unknown): n is number =>
+      typeof n === "number" && Number.isSafeInteger(n) && n >= 0 && n <= 1_000_000_000;
+    const reportedInput =
+      count(u?.input_tokens) &&
+      (u?.cache_read_input_tokens === undefined || count(u.cache_read_input_tokens)) &&
+      (u?.cache_creation_input_tokens === undefined || count(u.cache_creation_input_tokens))
+        ? u.input_tokens + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
+        : undefined;
+    const inputTokens = count(reportedInput) ? reportedInput : undefined;
+    const outputTokens = count(u?.output_tokens) ? u.output_tokens : undefined;
+    const costUsd =
+      inputTokens !== undefined && outputTokens !== undefined
+        ? listPriceUsd(model, inputTokens, outputTokens)
+        : undefined;
     return {
       providerId: "anthropic-api",
       model: alias,
       response: text,
       durationMs: Date.now() - started,
-      inputTokens,
-      outputTokens,
+      ...(inputTokens !== undefined ? { inputTokens } : {}),
+      ...(outputTokens !== undefined ? { outputTokens } : {}),
       ...(costUsd !== undefined ? { costUsd } : {}),
     };
   };

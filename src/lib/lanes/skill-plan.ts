@@ -3,7 +3,7 @@
 // `moss --explain run`, so the explanation is always of the call that would really be made.
 import { estimateTokens } from "../../repl/session.ts";
 import { claudeModel, type LaneTaskType } from "../providers/metadata.ts";
-import type { ProviderId } from "../providers/types.ts";
+import { PROVIDER_IDS, type ProviderId } from "../providers/types.ts";
 import { runFrontDoorHook } from "../taisce/hooks.ts";
 import {
   buildTaisceSkillPrompt,
@@ -66,4 +66,37 @@ export function pinForModel(model: string | undefined): {
 } {
   if (model === undefined) return {};
   return { pinLane: claudeModel(model) !== undefined ? "claude-code" : "ollama", pinModel: model };
+}
+
+// Shared intent contract for previews, both routers, and edit planning. A provider
+// pin never admits fallback; a model without a provider pins its native lane.
+export function requestPins(
+  model?: string,
+  provider?: ProviderId,
+  localOnly = false,
+): {
+  pinLane?: ProviderId;
+  pinModel?: string;
+} {
+  if (provider !== undefined && !(PROVIDER_IDS as readonly string[]).includes(provider))
+    throw new Error(`Unknown provider: ${provider}`);
+  const inferred = pinForModel(model);
+  const lane = provider ?? inferred.pinLane ?? (localOnly ? "ollama" : undefined);
+  if (localOnly && lane !== "ollama")
+    throw new Error("local-only request conflicts with hosted/provider pin.");
+  if (
+    model !== undefined &&
+    provider !== undefined &&
+    provider !== "cursor-manual" &&
+    provider !== "litellm"
+  ) {
+    const hosted = claudeModel(model) !== undefined;
+    if ((provider === "ollama" && hosted) || (provider !== "ollama" && !hosted)) {
+      throw new Error(`model '${model}' is incompatible with provider '${provider}'.`);
+    }
+  }
+  return {
+    ...(lane !== undefined ? { pinLane: lane } : {}),
+    ...(model !== undefined ? { pinModel: model } : {}),
+  };
 }

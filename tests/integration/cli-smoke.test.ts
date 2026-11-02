@@ -89,6 +89,64 @@ function makeTargetRepoWithDirtyDiff(): string {
 }
 
 describe("CLI integration smoke (no real Ollama, no cloud)", () => {
+  it("global and standalone ask previews use the same parser and manual-provider request", () => {
+    const request = [
+      "ask",
+      "synthetic prompt",
+      "--provider=cursor-manual",
+      "--model=packet-fixture",
+      "--system=a=b",
+      "--json",
+    ];
+    const global = runCli(["--explain", ...request], REPO_ROOT);
+    const own = runCli([...request, "--explain"], REPO_ROOT);
+    expect(global.status, global.stderr ?? "").toBe(0);
+    expect(own.status, own.stderr ?? "").toBe(0);
+    const { probedAt: _globalTime, ...globalBody } = JSON.parse(global.stdout ?? "{}");
+    const { probedAt: _ownTime, ...ownBody } = JSON.parse(own.stdout ?? "{}");
+    expect(globalBody).toEqual(ownBody);
+    expect(globalBody.selectedProvider).toBe("cursor-manual");
+    expect(globalBody.selectedModel).toBe("packet-fixture");
+    const literalGlobal = runCli(
+      [
+        "--json",
+        "--explain",
+        "ask",
+        "--provider=cursor-manual",
+        "--model=packet-fixture",
+        "--",
+        "--explain",
+      ],
+      REPO_ROOT,
+    );
+    const literalOwn = runCli(
+      [
+        "--json",
+        "ask",
+        "--explain",
+        "--provider=cursor-manual",
+        "--model=packet-fixture",
+        "--",
+        "--explain",
+      ],
+      REPO_ROOT,
+    );
+    expect(literalGlobal.status, literalGlobal.stderr ?? "").toBe(0);
+    expect(literalOwn.status, literalOwn.stderr ?? "").toBe(0);
+    const { probedAt: _literalGlobalTime, ...literalGlobalBody } = JSON.parse(
+      literalGlobal.stdout ?? "{}",
+    );
+    const { probedAt: _literalOwnTime, ...literalOwnBody } = JSON.parse(literalOwn.stdout ?? "{}");
+    expect(literalGlobalBody).toEqual(literalOwnBody);
+    for (const argv of [
+      ["--explain", "ask", "--provider=ollama=bad"],
+      ["ask", "--explain", "--provider=ollama=bad"],
+    ]) {
+      const invalid = runCli(argv, REPO_ROOT);
+      expect(invalid.status).not.toBe(0);
+      expect(invalid.stderr ?? "").toContain("--provider must be one of");
+    }
+  });
   it("`moss --help` lists the everyday surface; `moss help --all` adds the parked commands", () => {
     const everyday = runCli(["--help"], REPO_ROOT);
     expect(everyday.status).toBe(0);
@@ -144,10 +202,12 @@ describe("CLI integration smoke (no real Ollama, no cloud)", () => {
   });
 
   it("`moss ask --explain --json` returns ok=true with the documented shape (no dispatch)", () => {
-    // `--explain` must not touch the daemon or the registry: it
-    // exercises the router's probe-only path and renders the same
-    // explanation shape `moss auth --json` uses.
-    const result = runCli(["ask", "--explain", "--json"], REPO_ROOT);
+    // An explicit model skips registry resolution. Availability probes may
+    // run, but the requested generation is never dispatched.
+    const result = runCli(
+      ["ask", "--explain", "--model", "synthetic-preview", "--json"],
+      REPO_ROOT,
+    );
     expect(result.status, `stderr was: ${result.stderr}`).toBe(0);
     const parsed = JSON.parse(result.stdout ?? "{}");
     expect(parsed.ok).toBe(true);
@@ -179,7 +239,10 @@ describe("CLI integration smoke (no real Ollama, no cloud)", () => {
   });
 
   it("`moss ask --explain --task code-review --json` carries the chosen task", () => {
-    const result = runCli(["ask", "--explain", "--task", "code-review", "--json"], REPO_ROOT);
+    const result = runCli(
+      ["ask", "--explain", "--model", "synthetic-preview", "--task", "code-review", "--json"],
+      REPO_ROOT,
+    );
     expect(result.status, `stderr was: ${result.stderr}`).toBe(0);
     const parsed = JSON.parse(result.stdout ?? "{}");
     expect(parsed.task).toBe("code-review");
@@ -363,7 +426,8 @@ describe("CLI integration smoke (no real Ollama, no cloud)", () => {
 
     const anthropicApi = rowOf("anthropic-api");
     expect(anthropicApi, "anthropic-api missing from auth output").toBeDefined();
-    expect(["available", "not_configured"]).toContain(anthropicApi?.status);
+    expect(anthropicApi?.status).toBe("disabled");
+    expect(anthropicApi?.reason).toContain("caps.anthropic-api.enabled: false");
     if (anthropicApi?.status === "available") {
       expect(anthropicApi.executionReadiness).toBe("remote dispatch");
     }

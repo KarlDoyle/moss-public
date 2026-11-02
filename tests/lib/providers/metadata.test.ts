@@ -40,7 +40,7 @@ describe("src/lib/providers/metadata.ts", () => {
   });
 
   it("uses only valid billing values and honest hints for every lane", () => {
-    const validBilling = new Set(["local", "sub", "eur", "manual"]);
+    const validBilling = new Set(["local", "sub", "eur", "manual", "unknown"]);
     for (const id of PROVIDER_IDS) {
       const m = getProviderMetadata(id);
       expect(validBilling.has(m.billing)).toBe(true);

@@ -19,6 +19,7 @@ import {
   type RouterDependencies,
   routeAndGenerate,
 } from "../../../src/lib/providers/router.ts";
+import { policyApiOn } from "../lanes/fixtures.ts";
 
 const FROZEN_NOW = () => new Date("2026-05-22T15:00:00.000Z");
 
@@ -60,6 +61,8 @@ function depsWithProviders(
     listProviders,
     getProvider: (id) => providers[id],
     now: FROZEN_NOW,
+    policy: () => policyApiOn,
+    eurSpentToday: () => 0,
   };
 }
 
@@ -327,7 +330,7 @@ describe("router.routeAndGenerate — M11 fallback cascade", () => {
     });
     const { result, explanation } = await routeAndGenerate(
       "ask",
-      { task: "ask", prompt: "hello", model: "m" },
+      { task: "ask", prompt: "hello", model: "m", modelIsDefault: true },
       depsWithProviders({ ollama, litellm }, () => ["ollama", "litellm"]),
     );
     expect(result.providerId).toBe("litellm");
@@ -360,7 +363,7 @@ describe("router.routeAndGenerate — M11 fallback cascade", () => {
     await expect(
       routeAndGenerate(
         "ask",
-        { task: "ask", prompt: "p", model: "m" },
+        { task: "ask", prompt: "p", model: "m", modelIsDefault: true },
         depsWithProviders({ ollama, litellm }, () => ["ollama", "litellm"]),
       ),
     ).rejects.toBeInstanceOf(NetworkBoundaryError);
@@ -388,7 +391,7 @@ describe("router.routeAndGenerate — M11 fallback cascade", () => {
     await expect(
       routeAndGenerate(
         "ask",
-        { task: "ask", prompt: "p", model: "m" },
+        { task: "ask", prompt: "p", model: "m", modelIsDefault: true },
         depsWithProviders({ ollama, litellm }, () => ["ollama", "litellm"]),
       ),
     ).rejects.toThrow("unexpected bug");
@@ -430,7 +433,7 @@ describe("router.routeAndGenerate — M11 fallback cascade", () => {
     });
     const error = await routeAndGenerate(
       "ask",
-      { task: "ask", prompt: "p", model: "m" },
+      { task: "ask", prompt: "p", model: "m", modelIsDefault: true },
       depsWithProviders({ ollama, litellm }, () => ["ollama", "litellm"]),
     ).catch((e) => e);
     expect(error).toBeInstanceOf(AllProvidersFailedError);
@@ -480,7 +483,7 @@ describe("router.routeAndGenerate — M11 fallback cascade", () => {
     });
     const { result } = await routeAndGenerate(
       "ask",
-      { task: "ask", prompt: "hi", model: "m" },
+      { task: "ask", prompt: "hi", model: "m", modelIsDefault: true, provider: "cursor-manual" },
       depsWithProviders({ "cursor-manual": cursor }, () => ["cursor-manual"]),
     );
     expect(result.providerId).toBe("cursor-manual");

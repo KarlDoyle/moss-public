@@ -74,6 +74,7 @@ export interface ChatGenerateResult {
   readonly error?: string;
   // One line naming the lane and model that answered (and "stage-only" when gated).
   readonly route?: string;
+  readonly warnings?: readonly string[];
 }
 
 // A Taisce skill resolved for a slash command: the full prompt body (skill text, input and
@@ -110,7 +111,7 @@ export interface ChatSessionDeps {
   readonly initialModel?: string;
   readonly initialProvider?: ProviderId;
   // Render the current provider route decision for `/route` (M11).
-  readonly explainRoute?: (provider: ProviderId | undefined) => Promise<string>;
+  readonly explainRoute?: (provider: ProviderId | undefined, model?: string) => Promise<string>;
 
   // ---- The Taisce session (all optional: absent → plain `moss chat` behaviour) ----
   // Banner line; defaults to the plain chat banner.
@@ -139,7 +140,7 @@ export interface ChatSessionDeps {
   // lane instead of an Ollama model, and the reasoning-model check does not apply.
   readonly isClaudeModel?: (name: string) => boolean;
   // /model with no argument: which lane and model each task type would use right now.
-  readonly routeTable?: (pinnedModel: string | undefined) => Promise<string>;
+  readonly routeTable?: (pinnedModel: string | undefined, provider?: ProviderId) => Promise<string>;
   // /check: the rendered `moss check` report (report only, never fixes anything).
   readonly check?: () => Promise<string>;
 }
@@ -307,6 +308,7 @@ async function runTurn(
   };
   const result = await deps.generate(params);
   if (result.ok && result.response !== undefined) {
+    for (const warning of result.warnings ?? []) deps.err(warning);
     if (result.route !== undefined) deps.out(`· ${result.route}`);
     deps.out(result.response);
     state.turns.push({ role: "user", content: typed });
@@ -394,7 +396,8 @@ async function handleSlash(input: string, session: Session): Promise<SlashAction
     case "model":
       if (arg.length === 0) {
         deps.out(`model: ${state.model ?? "(routed per task — config/routing.yaml)"}`);
-        if (deps.routeTable !== undefined) deps.out(await deps.routeTable(state.model));
+        if (deps.routeTable !== undefined)
+          deps.out(await deps.routeTable(state.model, state.provider));
         if (deps.listModels !== undefined) {
           const pulled = await deps.listModels();
           deps.out(`pulled: ${pulled.length > 0 ? pulled.join(", ") : "none"}`);
@@ -482,6 +485,7 @@ async function handleSlash(input: string, session: Session): Promise<SlashAction
           generate: deps.generate,
           system: buildContextHeader({ privacy, brief: undefined, frontDoor: null, files: [] }),
           model: state.model,
+          ...(state.provider !== undefined ? { provider: state.provider } : {}),
           nextLine: session.nextLine,
         },
         arg,
@@ -493,7 +497,7 @@ async function handleSlash(input: string, session: Session): Promise<SlashAction
     // `/lanes` (kept, out of /help): the same per-task route table as `/model`.
     case "lanes": {
       if (deps.routeTable !== undefined) {
-        deps.out(await deps.routeTable(state.model));
+        deps.out(await deps.routeTable(state.model, state.provider));
         return "continue";
       }
       if (deps.explainRoute === undefined) {
@@ -502,7 +506,7 @@ async function handleSlash(input: string, session: Session): Promise<SlashAction
       }
       // Read-only: shows which lane Moss would dispatch to (and the fallback
       // order) for the pinned provider, or auto-route if none is pinned.
-      const rendered = await deps.explainRoute(state.provider);
+      const rendered = await deps.explainRoute(state.provider, state.model);
       deps.out(rendered);
       return "continue";
     }

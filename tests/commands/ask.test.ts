@@ -26,6 +26,7 @@ import {
   type RouterDependencies,
 } from "../../src/lib/providers/router.ts";
 import type { Registry, RegistryDependencies } from "../../src/lib/registry.ts";
+import { policy } from "../lib/lanes/fixtures.ts";
 
 const FROZEN_NOW = new Date("2026-05-22T10:00:00.000Z");
 
@@ -75,6 +76,8 @@ function fakeOllamaRouterDeps(
   const ollama = createOllamaProvider(providerDeps(netFetch));
   return {
     ...defaultRouterDependencies,
+    policy: () => policy,
+    eurSpentToday: () => 0,
     getProvider: (id: ProviderId): Provider | undefined => {
       if (id === "ollama") return ollama;
       if (id === "claude-code" || id === "anthropic-api") return undefined;
@@ -124,6 +127,8 @@ function fakeRouterDeps(opts: {
   }
   return {
     now,
+    policy: () => policy,
+    eurSpentToday: () => 0,
     listProviders: () => PROVIDER_ORDER,
     getProvider: (id) => providers[id],
   };
@@ -153,7 +158,7 @@ describe("runAskCommand", () => {
     expect(result.response).toBe("world");
     expect(result.model).toBe("llama3.2:3b");
     expect(out).toEqual(["world"]);
-    expect(err).toEqual([]);
+    expect(err).toEqual(["Accounting incomplete: provider token usage is unknown."]);
   });
 
   it("records one usage line per successful generation via the recordUsage seam", async () => {
@@ -306,15 +311,12 @@ describe("runAskCommand", () => {
     expect(err[0]).toContain("Start the daemon");
   });
 
-  it("falls back to cursor-manual handoff when Ollama is unreachable (T05)", async () => {
-    // With the default lane list (which now includes cursor-manual),
-    // Ollama-down is no longer a fatal error: the router selects the
-    // handoff lane and returns a structured packet. This is the M3
-    // memo decision 2 guarantee — every Moss box has a working answer.
+  it("supports explicit cursor-manual handoff when Ollama is unreachable", async () => {
     const out: string[] = [];
     const result = await runAskCommand({
       prompt: "review my diff",
       model: "x",
+      provider: "cursor-manual",
       emitJson: true,
       out: (l) => out.push(l),
       err: () => undefined,
@@ -391,7 +393,12 @@ describe("runAskCommand", () => {
     });
     expect(result.ok).toBe(true);
     const parsed = JSON.parse(out[0] ?? "");
-    expect(parsed).toEqual({ ok: true, model: "x", response: "y" });
+    expect(parsed).toEqual({
+      ok: true,
+      model: "x",
+      response: "y",
+      warnings: ["Accounting incomplete: provider token usage is unknown."],
+    });
   });
 
   it("forwards system and temperature in the request body", async () => {
@@ -555,13 +562,12 @@ describe("runAskCommand", () => {
       expect(err.join("\n")).toContain("directory");
     });
 
-    it("does not read the context file in explain mode", async () => {
-      const readFile = vi.fn(async () => {
-        throw new Error("should not read");
-      });
+    it("reads explicit synthetic context for the same preview budget as dispatch", async () => {
+      const readFile = vi.fn(async () => "synthetic preview context");
       const result = await runAskCommand({
         prompt: "",
         contextFilePath: "docs/missing.md",
+        model: "x",
         explain: true,
         emitJson: false,
         out: () => undefined,
@@ -573,7 +579,7 @@ describe("runAskCommand", () => {
         routerDeps: fakeRouterDeps({ available: new Set(["ollama"]) }),
       });
       expect(result.ok).toBe(true);
-      expect(readFile).not.toHaveBeenCalled();
+      expect(readFile).toHaveBeenCalledOnce();
     });
   });
 
@@ -588,6 +594,7 @@ describe("runAskCommand", () => {
       const err: string[] = [];
       const result = await runAskCommand({
         prompt: "",
+        model: "x",
         explain: true,
         emitJson: false,
         out: (l) => out.push(l),
@@ -606,6 +613,7 @@ describe("runAskCommand", () => {
       const routerDeps = fakeRouterDeps({ available: new Set(["ollama"]) });
       const result = await runAskCommand({
         prompt: "   ",
+        model: "x",
         explain: true,
         emitJson: false,
         out: () => undefined,
@@ -615,11 +623,12 @@ describe("runAskCommand", () => {
       expect(result.ok).toBe(true);
     });
 
-    it("does not load the model registry in explain mode", async () => {
+    it("does not load the model registry with an explicit preview model", async () => {
       const readFile = vi.fn();
       const routerDeps = fakeRouterDeps({ available: new Set(["ollama"]) });
       const result = await runAskCommand({
         prompt: "",
+        model: "x",
         explain: true,
         emitJson: false,
         out: () => undefined,
@@ -641,6 +650,7 @@ describe("runAskCommand", () => {
       const out: string[] = [];
       const result = await runAskCommand({
         prompt: "",
+        model: "x",
         explain: true,
         emitJson: true,
         out: (l) => out.push(l),
@@ -678,6 +688,7 @@ describe("runAskCommand", () => {
       const err: string[] = [];
       const result = await runAskCommand({
         prompt: "",
+        model: "x",
         explain: true,
         emitJson: false,
         out: () => undefined,
@@ -720,6 +731,7 @@ describe("runAskCommand", () => {
       await runAskCommand({
         prompt: "",
         task: "code-review",
+        model: "x",
         explain: true,
         emitJson: true,
         out: (l) => out.push(l),
@@ -775,6 +787,7 @@ describe("runAskCommand", () => {
       await runAskCommand({
         prompt: "",
         provider: "litellm",
+        model: "x",
         explain: true,
         emitJson: true,
         out: (l) => out.push(l),
