@@ -204,6 +204,25 @@ describe("router.explainProviderRoute", () => {
   });
 });
 
+describe("provider request byte budget", () => {
+  it("refuses a multibyte prompt before any provider generation", async () => {
+    const generate = vi.fn(async () => ({
+      providerId: "ollama" as const,
+      model: "m",
+      response: "r",
+    }));
+    const ollama = fakeProvider({ id: "ollama", status: "available", generate });
+    await expect(
+      routeAndGenerate(
+        "ask",
+        { task: "ask", prompt: "ééé", model: "fixture", maxRequestBytes: 5 },
+        depsWithProviders({ ollama }, () => ["ollama"]),
+      ),
+    ).rejects.toThrow(/request is 6 bytes.*limit is 5 bytes/);
+    expect(generate).not.toHaveBeenCalled();
+  });
+});
+
 describe("router.routeAndGenerate", () => {
   it("dispatches to the selected provider and returns its result + explanation", async () => {
     const generate = vi.fn(async () => ({

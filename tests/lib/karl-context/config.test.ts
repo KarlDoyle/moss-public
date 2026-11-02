@@ -52,4 +52,17 @@ describe("src/lib/karl-context/config.ts", () => {
     ).toThrow(KarlContextConfigInvalidError);
     expect(() => parseKarlContextConfigJson("not json")).toThrow(/not valid JSON/);
   });
+
+  it("rejects profile budgets above the bounded maximum", () => {
+    expect(() =>
+      parseKarlContextConfigJson(
+        JSON.stringify({
+          enabled: false,
+          path: "~/fixture",
+          profiles: { all: ["**"] },
+          maxBytes: 32_769,
+        }),
+      ),
+    ).toThrow(KarlContextConfigInvalidError);
+  });
 });

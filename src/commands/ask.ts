@@ -41,8 +41,10 @@ import {
 } from "../lib/registry.ts";
 import { recordUsageBestEffort, type UsageWriteInput } from "../lib/usage/log.ts";
 import type { UsageCommand } from "../lib/usage/types.ts";
+import { utf8Bytes } from "../lib/utf8.ts";
 
 export const ASK_CONTEXT_FILE_MAX_BYTES = 64 * 1024;
+export const ASK_REQUEST_MAX_BYTES = 64 * 1024;
 
 const CONTEXT_EXTENSIONS = new Set([".md", ".markdown", ".txt", ".text"]);
 const BLOCKED_CONTEXT_BASENAMES = new Set([
@@ -130,6 +132,8 @@ export interface AskCommandOptions {
   // The interactive session reuses this whole path but must log
   // `"chat"` so a chat turn never masquerades as an ask. See D-0020.
   readonly usageCommand?: UsageCommand;
+  // Combined UTF-8 byte budget for the final prompt and system context.
+  readonly maxRequestBytes?: number;
 }
 
 export interface AskCommandResult {
@@ -300,6 +304,14 @@ export async function runAskCommand(options: AskCommandOptions): Promise<AskComm
     }
   }
 
+  const maxRequestBytes = options.maxRequestBytes ?? ASK_REQUEST_MAX_BYTES;
+  const assembledRequestBytes = utf8Bytes(prompt) + utf8Bytes(options.system ?? "");
+  if (assembledRequestBytes > maxRequestBytes) {
+    const message = `moss ask: request is ${assembledRequestBytes} bytes; the combined prompt and system context limit is ${maxRequestBytes} bytes. Shorten the prompt or remove context before retrying.`;
+    options.err(message);
+    return { ok: false, error: message };
+  }
+
   const registryDeps = options.registryDeps ?? defaultRegistryDependencies;
 
   // Model resolution stays where it was in M2: registry-first, then
@@ -350,6 +362,7 @@ export async function runAskCommand(options: AskCommandOptions): Promise<AskComm
     ...(options.provider !== undefined ? { provider: options.provider } : {}),
     ...(options.system !== undefined ? { system: options.system } : {}),
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
+    maxRequestBytes,
   };
   // Preview uses the same resolved context, model and request constraints.
   // It accepts an empty prompt and performs availability probes, not the

@@ -479,6 +479,36 @@ describe("runAskCommand", () => {
       expect(parsed.contextFile.maxBytes).toBe(ASK_CONTEXT_FILE_MAX_BYTES);
     });
 
+    it("refuses combined prompt, system, and context-file bytes before routing", async () => {
+      const generate = vi.fn(async () => ({
+        providerId: "ollama" as const,
+        model: "stub-model",
+        response: "unexpected",
+      }));
+      const err: string[] = [];
+      const result = await runAskCommand({
+        prompt: "question",
+        system: "rules",
+        contextFilePath: "docs/context.md",
+        contextFileDeps: {
+          stat: async () => ({ isFile: () => true, isDirectory: () => false, size: 4 }),
+          readFile: async () => "éé",
+        },
+        maxRequestBytes: 10,
+        model: "stub",
+        emitJson: false,
+        out: () => undefined,
+        err: (line) => err.push(line),
+        routerDeps: fakeRouterDeps({
+          available: new Set(["ollama"]),
+          generators: { ollama: generate },
+        }),
+      });
+      expect(result.ok).toBe(false);
+      expect(err.join("\n")).toContain("combined prompt and system context limit is 10 bytes");
+      expect(generate).not.toHaveBeenCalled();
+    });
+
     it("rejects an absolute context file outside the project", async () => {
       const outsideFile = join(outside, "context.md");
       writeFileSync(outsideFile, "outside");

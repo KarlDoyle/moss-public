@@ -1,5 +1,6 @@
 import { PROVIDER_IDS, type ProviderId } from "../lib/providers/index.ts";
 import type { LaneTaskType } from "../lib/providers/metadata.ts";
+import { truncateUtf8, utf8Bytes } from "../lib/utf8.ts";
 import { runEdit, type SessionEditDeps } from "./edit.ts";
 
 export type { EditRoute, SessionEditDeps } from "./edit.ts";
@@ -65,6 +66,8 @@ export interface ChatGenerateParams {
   readonly task?: LaneTaskType;
   // This prompt's front-door lines, so the router can see an irreversible/external gate.
   readonly frontDoor?: string;
+  // Internal dispatch boundary: includes the final assembled provider prompt.
+  readonly maxRequestBytes?: number;
 }
 
 export interface ChatGenerateResult {
@@ -181,6 +184,33 @@ function contextBytes(turns: readonly ChatTurn[]): number {
   return turns.reduce((sum, turn) => sum + byteLength(turn.content), 0);
 }
 
+async function dispatchWithinBudget(
+  session: Session,
+  params: ChatGenerateParams,
+  maxResponseBytes = session.maxBytes,
+): Promise<ChatGenerateResult> {
+  const { deps } = session;
+  const bytes = utf8Bytes(params.prompt) + utf8Bytes(params.system ?? "");
+  if (bytes > session.maxBytes) {
+    return {
+      ok: false,
+      error: `request is ${bytes} bytes; the combined prompt and system context limit is ${session.maxBytes} bytes. Shorten the prompt or remove loaded context before retrying.`,
+    };
+  }
+  const result = await deps.generate({ ...params, maxRequestBytes: session.maxBytes });
+  if (!result.ok || result.response === undefined) return result;
+  const response = truncateUtf8(result.response, maxResponseBytes);
+  if (response === result.response) return result;
+  return {
+    ...result,
+    response,
+    warnings: [
+      ...(result.warnings ?? []),
+      `Response truncated to ${utf8Bytes(response)} bytes to keep this turn within the ${session.maxBytes}-byte limit.`,
+    ],
+  };
+}
+
 // Trim the oldest turns until the transcript fits the budget, always keeping
 // at least the most recent turn so a follow-up still has something to build on.
 function evictToBudget(turns: ChatTurn[], maxBytes: number): void {
@@ -277,6 +307,7 @@ async function runTurn(
   typed: string,
   body: string,
   task: LaneTaskType = "brief",
+  trimTranscriptToFit = false,
 ): Promise<ChatGenerateResult | null> {
   const { state, deps } = session;
   const frontDoor = deps.frontDoor !== undefined ? await deps.frontDoor(typed) : null;
@@ -297,8 +328,21 @@ async function runTurn(
       return null;
     }
   }
+  let prompt = body;
+  const requestSize = () => utf8Bytes(prompt) + utf8Bytes(header);
+  const minimumRequestBytes = utf8Bytes(synthesisePrompt([], typed)) + utf8Bytes(header);
+  while (
+    trimTranscriptToFit &&
+    minimumRequestBytes <= session.maxBytes &&
+    requestSize() > session.maxBytes &&
+    state.turns.length > 0
+  ) {
+    const oldest = state.turns.shift();
+    if (oldest?.role === "user" && state.turns[0]?.role === "assistant") state.turns.shift();
+    prompt = synthesisePrompt(state.turns, typed);
+  }
   const params: ChatGenerateParams = {
-    prompt: body,
+    prompt,
     ...(header.length > 0 ? { system: header } : {}),
     ...(state.model !== undefined ? { model: state.model } : {}),
     ...(state.provider !== undefined ? { provider: state.provider } : {}),
@@ -306,7 +350,11 @@ async function runTurn(
     ...(frontDoor !== null ? { frontDoor } : {}),
     task,
   };
-  const result = await deps.generate(params);
+  const result = await dispatchWithinBudget(
+    session,
+    params,
+    Math.max(0, session.maxBytes - utf8Bytes(typed)),
+  );
   if (result.ok && result.response !== undefined) {
     for (const warning of result.warnings ?? []) deps.err(warning);
     if (result.route !== undefined) deps.out(`· ${result.route}`);
@@ -482,7 +530,7 @@ async function handleSlash(input: string, session: Session): Promise<SlashAction
           edit: deps.edit,
           out: deps.out,
           err: deps.err,
-          generate: deps.generate,
+          generate: (params) => dispatchWithinBudget(session, params),
           system: buildContextHeader({ privacy, brief: undefined, frontDoor: null, files: [] }),
           model: state.model,
           ...(state.provider !== undefined ? { provider: state.provider } : {}),
@@ -532,6 +580,7 @@ async function handleSlash(input: string, session: Session): Promise<SlashAction
       deps.out(
         `context:  ~${(contextBytes(state.turns) / 1024).toFixed(1)} KiB / ${(max / 1024).toFixed(0)} KiB`,
       );
+      deps.out(`request budget: ${max.toLocaleString("en-GB")} bytes combined prompt + system`);
       if (deps.projectRoot !== undefined) {
         deps.out(`moss home: ${deps.projectRoot()}`);
       }
@@ -626,7 +675,7 @@ export async function runChatSession(deps: ChatSessionDeps): Promise<void> {
       continue;
     }
 
-    await runTurn(session, line, synthesisePrompt(state.turns, line));
+    await runTurn(session, line, synthesisePrompt(state.turns, line), "brief", true);
     deps.prompt?.();
   }
 }

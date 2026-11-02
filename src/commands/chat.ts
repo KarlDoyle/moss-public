@@ -2,11 +2,11 @@ import { existsSync, realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
 import type { Command } from "commander";
 import {
-  buildAiderArgs,
   buildEditPlanPrompt,
   defaultAiderRunner,
   parseEditPlan,
   pickFiles,
+  runAiderConfined,
   tidyAiderOutput,
 } from "../lib/aider.ts";
 import { assertSafeGitConfig, gitDiffStat, gitTopLevel, gitTrackedFiles } from "../lib/git.ts";
@@ -101,6 +101,7 @@ async function legacyGenerate(params: ChatGenerateParams): Promise<ChatGenerateR
     ...(request.model !== undefined ? { model: request.model } : {}),
     ...(request.provider !== undefined ? { provider: request.provider } : {}),
     ...(request.contextProfile !== undefined ? { karlContextProfile: request.contextProfile } : {}),
+    ...(request.maxRequestBytes !== undefined ? { maxRequestBytes: request.maxRequestBytes } : {}),
   };
 
   const result = await runAskCommand(options);
@@ -150,7 +151,7 @@ export function buildTaisceSessionDeps(
   const liveSkills = (): SessionSkill[] => (present ? listLiveTaisceSkills(root) : []);
   return {
     banner:
-      "moss — Taisce session, local model. Ollama runs it, moss asks it, Aider edits with it. /help lists everything, /exit leaves.",
+      "moss — Taisce session, local model. Ollama runs it and moss asks it. Optional Aider edits are unsupported. /help lists everything, /exit leaves.",
     brief: () => (present ? runSessionStartHook(root) : Promise.resolve(null)),
     frontDoor: (prompt) => (present ? runFrontDoorHook(prompt, root) : Promise.resolve(null)),
     guardrails: () => (present ? loadTaisceGuardrails(root) : null),
@@ -211,9 +212,10 @@ export function buildTaisceSessionDeps(
       coderModel: () => resolveCoderModel(),
       aider: async (repo, options) => {
         await assertSafeGitConfig(repo);
-        const result = await defaultAiderRunner(
-          buildAiderArgs({ ...options, model: options.model ?? resolveCoderModel() }),
+        const result = await runAiderConfined(
           repo,
+          { ...options, model: options.model ?? resolveCoderModel() },
+          defaultAiderRunner,
         );
         return { exitCode: result.exitCode, output: tidyAiderOutput(result.output) };
       },
