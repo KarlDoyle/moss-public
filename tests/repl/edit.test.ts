@@ -87,7 +87,7 @@ describe("/edit on a Claude lane", () => {
 
   it("refuses a diff that strays outside the plan, or does not apply cleanly, or is empty", async () => {
     const stray = setup(claude, ["y"], {
-      claudeDiff: async () => ({ ok: true, diff: `${DIFF}--- a/b.py\n+++ b/b.py\n` }),
+      claudeDiff: async () => ({ ok: true, diff: `${DIFF}${DIFF.replaceAll("a.py", "b.py")}` }),
     });
     await runEdit(stray.ctx, "set x in a.py");
     expect(stray.err[0]).toContain("outside the plan (b.py)");
@@ -165,7 +165,8 @@ describe("/edit on the local lane", () => {
 });
 
 describe("diffPaths", () => {
-  it("lists every file a diff touches, ignoring /dev/null", () => {
-    expect(diffPaths(`${DIFF}--- /dev/null\n+++ b/new.py\n`)).toEqual(["a.py", "new.py"]);
+  it("lists text modifications and refuses creation headers", () => {
+    expect(diffPaths(DIFF)).toEqual(["a.py"]);
+    expect(() => diffPaths(`${DIFF}--- /dev/null\n+++ b/new.py\n`)).toThrow();
   });
 });

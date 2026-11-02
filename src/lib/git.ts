@@ -1,4 +1,5 @@
 import { run } from "./exec.ts";
+import { validateTextPatch } from "./patch.ts";
 
 export class GitDiffEmptyError extends Error {
   constructor(path: string) {
@@ -19,7 +20,7 @@ export class GitRepoMutatedError extends Error {
 export class GitHostileConfigError extends Error {
   constructor(target: string, detail: string) {
     super(
-      `Refusing to read git from '${target}': the target's local .git/config defines a directive that can execute arbitrary code (${detail}). Re-run after removing the directive, or use a different target.`,
+      `Refusing to read git from '${target}': the target's effective Git configuration defines a directive that can execute arbitrary code (${detail}). Re-run after removing the directive, or use a different target.`,
     );
     this.name = "GitHostileConfigError";
   }
@@ -58,14 +59,8 @@ const GIT_TIMEOUT_MS = 15_000;
 //      cannot fire even if the user has them configured globally.
 // -----------------------------------------------------------------------------
 
-// Defensive `-c` flags. Every entry must be a *valid* Git config key. We
-// deliberately do NOT pass `-c filter.process=` — that is not a generic
-// Git config key (the real key is `filter.<driver>.process`, a per-driver
-// setting with no global form), and passing it would either be a no-op or
-// produce a parse error depending on the git version. The per-driver
-// filter risk is handled by `assertNoDangerousLocalConfig` below, which
-// refuses to run when any `filter.<d>.{process,clean,smudge}` is present
-// in the target's local config. See reports/safety-auditor-M2-followup.md.
+// Defensive overrides apply to inspection and operations alike. Per-driver filters
+// cannot be disabled by a wildcard override; assertSafeGitConfig refuses them.
 export const GIT_HARDENING_FLAGS: readonly string[] = [
   "-c",
   "core.fsmonitor=false",
@@ -121,6 +116,7 @@ const DIFF_HARDENING_FLAGS: readonly string[] = ["--no-ext-diff", "--no-textconv
 export interface SafeGitOptions {
   readonly cwd: string;
   readonly allowFailure?: boolean;
+  readonly input?: string;
 }
 
 export interface SafeGitResult {
@@ -137,6 +133,9 @@ export async function safeGit(
 ): Promise<SafeGitResult> {
   if (args.length === 0) {
     throw new Error("safeGit requires at least one argument (the git subcommand).");
+  }
+  if (args[0] !== "config" && args[0] !== "--version") {
+    await assertSafeGitConfig(options.cwd);
   }
   const subcommand = args[0] as string;
   const subcommandArgs = args.slice(1);
@@ -155,50 +154,46 @@ export async function safeGit(
     env: GIT_SAFE_ENV,
     unsetEnv: GIT_INHERITED_ENV,
     allowFailure: options.allowFailure ?? false,
+    ...(options.input !== undefined ? { input: options.input } : {}),
   });
   return { stdout: result.stdout, exitCode: result.exitCode, stderr: result.stderr };
 }
 
 // -----------------------------------------------------------------------------
-// Repo-local config refusal model
+// Effective configuration refusal model
 //
-// Some directives have NO safe in-process override: setting them to an
-// empty value (e.g. `-c diff.external=`) makes git try to invoke the empty
-// command and fail. For these we audit the target's local config with
-// `git config --local --name-only --list` and refuse to run with
-// `GitHostileConfigError` rather than running with weakened safety.
-//
-// `git config --local --name-only --list` only enumerates keys; it does
-// not consult hooks, filters, fsmonitor, or external diff helpers, so it
-// is safe to run against an otherwise-hostile repo.
+// Enumerate keys with includes and conditional includes under the same cwd and
+// hardened environment as the operation. This includes global, local, worktree
+// and command configuration (system configuration is disabled for both).
+// Config enumeration does not run filters/hooks. Fail closed on errors/framing.
 // -----------------------------------------------------------------------------
 
-const REFUSE_LOCAL_CONFIG_KEYS: readonly RegExp[] = [
+const REFUSE_EFFECTIVE_CONFIG_KEYS: readonly RegExp[] = [
   /^core\.sshcommand$/i,
-  /^filter\.[^.]+\.(process|clean|smudge)$/i,
+  /^filter\.[\s\S]*\.(process|clean|smudge)$/i,
   /^url\..+\.insteadof$/i,
 ];
 
-async function listLocalConfigKeys(repoPath: string): Promise<string[]> {
-  const result = await safeGit(["config", "--local", "--name-only", "--list"], {
+async function listEffectiveConfigKeys(repoPath: string): Promise<string[]> {
+  const result = await safeGit(["config", "--includes", "--null", "--name-only", "--list"], {
     cwd: repoPath,
     allowFailure: true,
   });
   if (result.exitCode !== 0) {
-    return [];
+    throw new GitHostileConfigError(repoPath, "effective configuration inspection failed");
   }
-  return result.stdout
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line !== "");
+  if (result.stdout !== "" && !result.stdout.endsWith("\0")) {
+    throw new GitHostileConfigError(repoPath, "ambiguous configuration inspection output");
+  }
+  return result.stdout.split("\0").filter((line) => line !== "");
 }
 
-async function assertNoDangerousLocalConfig(repoPath: string): Promise<void> {
-  const keys = await listLocalConfigKeys(repoPath);
+export async function assertSafeGitConfig(repoPath: string): Promise<void> {
+  const keys = await listEffectiveConfigKeys(repoPath);
   for (const key of keys) {
-    for (const pattern of REFUSE_LOCAL_CONFIG_KEYS) {
+    for (const pattern of REFUSE_EFFECTIVE_CONFIG_KEYS) {
       if (pattern.test(key)) {
-        throw new GitHostileConfigError(repoPath, `local config defines '${key}'`);
+        throw new GitHostileConfigError(repoPath, `effective config defines '${key}'`);
       }
     }
   }
@@ -266,11 +261,10 @@ export async function gitTopLevel(cwd: string): Promise<string | null> {
 // Tracked files, for the `/edit` planner to pick from. Capped so a huge repo cannot flood a
 // local model's context window.
 export async function gitTrackedFiles(repoPath: string, max = 400): Promise<string[]> {
-  const result = await safeGit(["ls-files"], { cwd: repoPath, allowFailure: true });
+  const result = await safeGit(["ls-files", "-z"], { cwd: repoPath, allowFailure: true });
   if (result.exitCode !== 0) return [];
   return result.stdout
-    .split("\n")
-    .map((line) => line.trim())
+    .split("\0")
     .filter((line) => line.length > 0)
     .slice(0, max);
 }
@@ -281,18 +275,21 @@ export async function gitDiffStat(repoPath: string): Promise<string> {
   return result.stdout.trimEnd();
 }
 
-// `git apply` of a patch file — `/edit` on a Claude lane applies exactly the diff the operator
+// `git apply` of patch text via stdin — `/edit` on a Claude lane applies exactly the diff the operator
 // approved. check=true runs `--check` first, which touches nothing.
 export async function gitApply(
   repoPath: string,
-  patchFile: string,
+  patch: string,
   check: boolean,
+  files: readonly string[],
 ): Promise<{ ok: boolean; output: string }> {
+  validateTextPatch(repoPath, patch, files);
   const result = await safeGit(
-    ["apply", ...(check ? ["--check"] : []), "--whitespace=nowarn", patchFile],
+    ["apply", ...(check ? ["--check"] : []), "--whitespace=nowarn", "-"],
     {
       cwd: repoPath,
       allowFailure: true,
+      input: patch,
     },
   );
   return { ok: result.exitCode === 0, output: `${result.stderr ?? ""}${result.stdout}` };
@@ -312,7 +309,7 @@ export async function gitStatusPorcelain(repoPath: string): Promise<string> {
 }
 
 export async function snapshotRepo(repoPath: string): Promise<RepoSnapshot> {
-  await assertNoDangerousLocalConfig(repoPath);
+  await assertSafeGitConfig(repoPath);
   const [head, statusPorcelain] = await Promise.all([
     gitHeadSha(repoPath),
     gitStatusPorcelain(repoPath),
@@ -396,7 +393,7 @@ function summariseNumstat(numstat: string, label: string): string {
 // already includes the staged content, so a dedicated staged branch would be
 // dead code (if `git diff HEAD` is empty, `git diff --cached` is also empty).
 export async function diffForReview(repoPath: string): Promise<DiffResult> {
-  await assertNoDangerousLocalConfig(repoPath);
+  await assertSafeGitConfig(repoPath);
   const working = await gitDiffWorkingVsHead(repoPath);
   if (working.trim() !== "") {
     const summary = summariseNumstat(await gitNumstat(repoPath, ["HEAD"]), "working-tree-vs-HEAD");
