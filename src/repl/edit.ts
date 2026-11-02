@@ -1,0 +1,132 @@
+// `/edit <ask>` — lane-aware. The plan is made on the routed `edit` lane, then:
+//
+//   local lane (ollama)  → Aider --architect (chat model) + --editor-model (coder), dry run,
+//                          diff shown, "go?", real run. The apply is a second generation.
+//   Claude lane          → the lane writes a unified diff for exactly the planned files; moss
+//                          shows it, `git apply --check`s it, "go?", then applies THAT diff —
+//                          what was approved is what lands.
+//   stage-only (a gate)  → the plan and diff are shown and nothing is applied, no "go?".
+//
+// Never commits. Every side effect is an injected dependency (wired in src/commands/chat.ts).
+import { claudeLane, localLane } from "./edit-lanes.ts";
+import type { ChatGenerateParams, ChatGenerateResult } from "./session.ts";
+
+export { diffPaths } from "./edit-lanes.ts";
+
+export interface EditRoute {
+  readonly lane: "ollama" | "claude-code" | "anthropic-api" | null;
+  readonly model: string | null;
+  readonly editorModel?: string;
+  readonly stageOnly: boolean;
+  // One line for the operator: lane, model, and why.
+  readonly summary: string;
+}
+
+// Everything `/edit` needs from the outside world. Wired to src/lib/aider.ts + git.ts.
+export interface SessionEditDeps {
+  // The repo to edit: the cwd's git top level, else the Taisce checkout.
+  readonly resolveRepo: () => Promise<string | null>;
+  readonly trackedFiles: (repo: string) => Promise<string[]>;
+  // Throws (with the guard message) when a picked file is sensitivity-gated.
+  readonly checkFiles: (repo: string, files: readonly string[]) => void;
+  readonly coderModel: () => string;
+  readonly aider: (
+    repo: string,
+    options: {
+      message: string;
+      files: readonly string[];
+      dryRun: boolean;
+      model?: string;
+      editorModel?: string;
+    },
+  ) => Promise<{ exitCode: number; output: string }>;
+  readonly diffStat: (repo: string) => Promise<string>;
+  readonly buildPlanPrompt: (ask: string, tracked: readonly string[]) => string;
+  readonly parsePlan: (text: string) => { files: string; plan: string };
+  readonly pickFiles: (text: string, tracked: readonly string[]) => string[];
+  // The routed edit lane for this ask (absent → the local lane, as before the router).
+  readonly route?: (ask: string, pinnedModel: string | undefined) => Promise<EditRoute>;
+  // Claude lane: a unified diff implementing the plan on exactly these files.
+  readonly claudeDiff?: (
+    repo: string,
+    plan: string,
+    files: readonly string[],
+    route: EditRoute,
+  ) => Promise<{ ok: boolean; diff?: string; error?: string }>;
+  // `git apply` (check=true: `--check`, touches nothing).
+  readonly applyPatch?: (
+    repo: string,
+    diff: string,
+    check: boolean,
+  ) => Promise<{ ok: boolean; output: string }>;
+}
+
+export interface EditContext {
+  readonly edit: SessionEditDeps | undefined;
+  readonly out: (line: string) => void;
+  readonly err: (line: string) => void;
+  readonly generate: (params: ChatGenerateParams) => Promise<ChatGenerateResult>;
+  readonly system: string; // the privacy header, sent with the planning turn
+  readonly model: string | undefined; // the session pin
+  readonly nextLine: () => Promise<string | undefined>;
+}
+
+const LOCAL: EditRoute = {
+  lane: "ollama",
+  model: null,
+  stageOnly: false,
+  summary: "local lane (Aider)",
+};
+
+export async function runEdit(ctx: EditContext, ask: string): Promise<void> {
+  const edit = ctx.edit;
+  if (edit === undefined) {
+    ctx.err("/edit is not available in this session.");
+    return;
+  }
+  if (ask.length === 0) {
+    ctx.err("usage: /edit <what to change>");
+    return;
+  }
+  const repo = await edit.resolveRepo();
+  if (repo === null) {
+    ctx.err("/edit: no git repo here and no Taisce checkout to fall back to.");
+    return;
+  }
+  const tracked = await edit.trackedFiles(repo);
+  const route = edit.route !== undefined ? await edit.route(ask, ctx.model) : LOCAL;
+  if (route.lane === null) {
+    ctx.err(`/edit: no lane can edit right now — ${route.summary}`);
+    return;
+  }
+  ctx.out(`· edit in ${repo} — ${route.summary}`);
+
+  // 1. Plan on the edit lane. The privacy rules ride along like every other turn.
+  const planned = await ctx.generate({
+    prompt: edit.buildPlanPrompt(ask, tracked),
+    task: "edit",
+    ...(ctx.system.length > 0 ? { system: ctx.system } : {}),
+    ...(ctx.model !== undefined ? { model: ctx.model } : {}),
+  });
+  if (!planned.ok || planned.response === undefined) {
+    ctx.err(planned.error ?? "/edit: planning failed.");
+    return;
+  }
+  const { files: namedFiles, plan } = edit.parsePlan(planned.response);
+  const files = edit.pickFiles(`${namedFiles}\n${ask}`, tracked);
+  ctx.out("plan:");
+  ctx.out(`  files: ${files.length > 0 ? files.join(", ") : "(none matched this repo)"}`);
+  ctx.out(`  ${plan}`);
+  if (files.length === 0) {
+    ctx.err("/edit: the plan named no file tracked in this repo. Name the file in your ask.");
+    return;
+  }
+  try {
+    edit.checkFiles(repo, files);
+  } catch (error) {
+    ctx.err(error instanceof Error ? error.message : String(error));
+    return;
+  }
+  if (route.lane === "ollama") await localLane(ctx, edit, repo, plan, files, route);
+  else await claudeLane(ctx, edit, repo, plan, files, route);
+}

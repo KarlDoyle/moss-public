@@ -1,0 +1,290 @@
+import { existsSync, realpathSync } from "node:fs";
+import { createInterface } from "node:readline";
+import type { Command } from "commander";
+import {
+  buildAiderArgs,
+  buildEditPlanPrompt,
+  defaultAiderRunner,
+  parseEditPlan,
+  pickFiles,
+  tidyAiderOutput,
+} from "../lib/aider.ts";
+import { gitDiffStat, gitTopLevel, gitTrackedFiles } from "../lib/git.ts";
+import { defaultHealthCtx } from "../lib/health/context.ts";
+import { renderReport, runChecks } from "../lib/health/runner.ts";
+import { loadRoutingPolicy, taskForSkill } from "../lib/lanes/policy.ts";
+import { assertChatModel, resolveCoderModel, resolveNumCtx } from "../lib/ollama.ts";
+import { ollamaUse, turnOffOllama } from "../lib/ollama-lifecycle.ts";
+import { assertTaiscePathReadable, getProjectRoot, resolveTaisceRoot } from "../lib/paths.ts";
+import { formatRouteExplanationHuman } from "../lib/providers/explain-render.ts";
+import { PROVIDER_IDS, type ProviderId } from "../lib/providers/index.ts";
+import { claudeModel } from "../lib/providers/metadata.ts";
+import { defaultRouterDependencies, explainProviderRoute } from "../lib/providers/router.ts";
+import { bestModel, defaultRegistryDependencies, loadRegistry } from "../lib/registry.ts";
+import { runFrontDoorHook, runSessionStartHook } from "../lib/taisce/hooks.ts";
+import {
+  buildTaisceSkillPrompt,
+  defaultContextFor,
+  findTaisceSkill,
+  listLiveTaisceSkills,
+  loadTaisceGuardrails,
+  readGuardedTaisceFile,
+} from "../lib/taisce/skills.ts";
+import { recordUsageBestEffort } from "../lib/usage/log.ts";
+import {
+  type ChatGenerateParams,
+  type ChatGenerateResult,
+  type ChatSessionDeps,
+  runChatSession,
+  type SessionSkill,
+} from "../repl/session.ts";
+import { type AskCommandOptions, runAskCommand } from "./ask.ts";
+import { applyPatch, claudeDiff, editRoute, routedGenerate, routeTable } from "./chat-lanes.ts";
+import { allChecks } from "./check.ts";
+import { defaultDoctorDependencies, gatherDiagnostics, runDoctorCommand } from "./doctor.ts";
+import { formatLaneStatus, gatherLaneStatus } from "./lane-status.ts";
+
+// Default model turn for the interactive session: delegate to the existing
+// `runAskCommand` path so all routing, safety boundaries, and usage logging
+// are inherited unchanged. Usage is logged as `command: "chat"` (D-0020).
+// The response text is captured rather than printed directly so the session
+// owns all output formatting.
+export async function chatGenerate(params: ChatGenerateParams): Promise<ChatGenerateResult> {
+  // Routed by config/routing.yaml unless the operator pinned a legacy lane with /provider or a
+  // karl-context profile with /context — those keep the pre-router `moss ask` path.
+  if (params.provider === undefined && params.contextProfile === undefined) {
+    return routedGenerate(params);
+  }
+  return legacyGenerate(params);
+}
+
+async function legacyGenerate(params: ChatGenerateParams): Promise<ChatGenerateResult> {
+  // Never a reasoning model for chat — including when the registry picks one because
+  // nothing else is installed. Resolve the default here so the check sees a real name.
+  let model = params.model;
+  let request = params;
+  if (model === undefined && params.provider === undefined) {
+    try {
+      model = bestModel(await loadRegistry(defaultRegistryDependencies))?.name;
+    } catch {
+      model = undefined; // no registry: let the ask path report it
+    }
+  }
+  if (model !== undefined) {
+    try {
+      assertChatModel(model);
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    request = { ...params, model };
+  }
+  const captured: string[] = [];
+  let lastError: string | undefined;
+
+  const options: AskCommandOptions = {
+    prompt: request.prompt,
+    emitJson: false,
+    out: (line) => captured.push(line),
+    err: (line) => {
+      lastError = line;
+    },
+    usageCommand: "chat",
+    ...(request.system !== undefined ? { system: request.system } : {}),
+    recordUsage: (input) => recordUsageBestEffort(input).then(() => undefined),
+    ...(request.model !== undefined ? { model: request.model } : {}),
+    ...(request.provider !== undefined ? { provider: request.provider } : {}),
+    ...(request.contextProfile !== undefined ? { karlContextProfile: request.contextProfile } : {}),
+  };
+
+  const result = await runAskCommand(options);
+  if (result.ok) {
+    return {
+      ok: true,
+      response: captured.join("\n"),
+      ...(result.model !== undefined ? { model: result.model } : {}),
+    };
+  }
+  return { ok: false, error: result.error ?? lastError ?? "generation failed." };
+}
+
+// Read-only route explanation for the session's `/route` command.
+// Mirrors `moss ask --explain`: uses the deterministic router, shrinking the
+// lane list to the pinned provider when one is set, and returns the shared
+// human-readable render. Probes are read-only (D-0009); nothing is executed.
+export async function chatExplainRoute(provider: ProviderId | undefined): Promise<string> {
+  const routerDeps =
+    provider !== undefined
+      ? { ...defaultRouterDependencies, listProviders: () => [provider] }
+      : defaultRouterDependencies;
+  const explanation = await explainProviderRoute("ask", routerDeps);
+  return formatRouteExplanationHuman(explanation, { heading: "moss chat — route preview" });
+}
+
+function parseProvider(value: string): ProviderId {
+  if ((PROVIDER_IDS as readonly string[]).includes(value)) {
+    return value as ProviderId;
+  }
+  throw new Error(`--provider must be one of: ${PROVIDER_IDS.join(", ")}; got '${value}'`);
+}
+
+// Everything the Taisce session needs, wired to the guarded helpers in src/lib. Kept as a
+// function so a test can assert the wiring without starting readline.
+export function buildTaisceSessionDeps(
+  root: string = resolveTaisceRoot(),
+): Omit<ChatSessionDeps, "lines" | "out" | "err" | "generate"> {
+  const present = existsSync(root);
+  const liveSkills = (): SessionSkill[] => (present ? listLiveTaisceSkills(root) : []);
+  return {
+    banner:
+      "moss — Taisce session, local model. Ollama runs it, moss asks it, Aider edits with it. /help lists everything, /exit leaves.",
+    brief: () => (present ? runSessionStartHook(root) : Promise.resolve(null)),
+    frontDoor: (prompt) => (present ? runFrontDoorHook(prompt, root) : Promise.resolve(null)),
+    guardrails: () => (present ? loadTaisceGuardrails(root) : null),
+    skills: liveSkills,
+    skillPrompt: (command, input) => {
+      const skill = findTaisceSkill(command, root);
+      if (skill === null) throw new Error(`no Taisce skill '${command}' under ${root}.`);
+      const loaded = [skill.path.replace(`${root}/`, "")];
+      const parts = [input];
+      const contextFile = defaultContextFor(skill.id);
+      if (contextFile !== undefined) {
+        parts.push(readGuardedTaisceFile(contextFile, root));
+        loaded.push(contextFile);
+      }
+      const guardrailsPresent = loadTaisceGuardrails(root) !== null;
+      const joined = parts.filter((p) => p.trim().length > 0).join("\n\n");
+      // Privacy rules go in the session header, not here, so they are never sent twice.
+      let task: ReturnType<typeof taskForSkill> = "brief";
+      try {
+        task = taskForSkill(loadRoutingPolicy(), skill.id, skill.content);
+      } catch {
+        // no readable routing.yaml: the skill routes as a brief, which is always local
+      }
+      return {
+        id: skill.id,
+        body: buildTaisceSkillPrompt(skill, null, joined, { privacyCheck: guardrailsPresent }),
+        loaded,
+        task,
+      };
+    },
+    readFile: (relPath) => readGuardedTaisceFile(relPath, root),
+    status: async () => {
+      const lines: string[] = [];
+      await runDoctorCommand({ emitJson: false, out: (line) => lines.push(line) });
+      lines.push("", formatLaneStatus(await gatherLaneStatus()));
+      return lines.join("\n");
+    },
+    listModels: async () => {
+      const report = await gatherDiagnostics(defaultDoctorDependencies);
+      return report.ollama.models.map((m) => m.name);
+    },
+    checkModel: assertChatModel,
+    isClaudeModel: (name) => claudeModel(name) !== undefined,
+    routeTable: (pinned) => routeTable(pinned),
+    check: async () => {
+      const results = await runChecks(allChecks(), defaultHealthCtx(false));
+      return renderReport(results, new Date());
+    },
+    numCtx: resolveNumCtx(),
+    edit: {
+      resolveRepo: async () => (await gitTopLevel(process.cwd())) ?? (present ? root : null),
+      trackedFiles: (repo) => gitTrackedFiles(repo),
+      checkFiles: (repo, files) => {
+        // Inside Taisce, Aider may only be handed files guard-reads allows.
+        if (realIfExists(repo) !== realIfExists(root)) return;
+        for (const file of files) assertTaiscePathReadable(root, file);
+      },
+      coderModel: () => resolveCoderModel(),
+      aider: async (repo, options) => {
+        const result = await defaultAiderRunner(
+          buildAiderArgs({ ...options, model: options.model ?? resolveCoderModel() }),
+          repo,
+        );
+        return { exitCode: result.exitCode, output: tidyAiderOutput(result.output) };
+      },
+      diffStat: (repo) => gitDiffStat(repo),
+      buildPlanPrompt: buildEditPlanPrompt,
+      parsePlan: parseEditPlan,
+      pickFiles: (text, tracked) => pickFiles(text, tracked),
+      route: async (ask, pinned) =>
+        editRoute(ask, pinned, present ? await runFrontDoorHook(ask, root) : null),
+      claudeDiff: (repo, plan, files, route) => claudeDiff(repo, plan, files, route),
+      applyPatch: (repo, diff, check) => applyPatch(repo, diff, check),
+    },
+  };
+}
+
+function realIfExists(path: string): string {
+  return existsSync(path) ? realpathSync(path) : path;
+}
+
+// The interactive session. `moss` with no arguments and `moss chat` both land here.
+export async function startSession(
+  commandOpts: { model?: string; provider?: ProviderId } = {},
+): Promise<void> {
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    prompt: "moss › ",
+  });
+  // Piped input (a script, a test) can reach EOF while a model turn is still running;
+  // prompting a closed interface throws, so the prompt is skipped once input has ended.
+  let closed = false;
+  rl.on("close", () => {
+    closed = true;
+  });
+
+  const deps: ChatSessionDeps = {
+    lines: rl,
+    out: (line) => process.stdout.write(`${line}\n`),
+    err: (line) => process.stderr.write(`${line}\n`),
+    prompt: () => {
+      if (!closed) rl.prompt();
+    },
+    projectRoot: () => getProjectRoot(),
+    generate: chatGenerate,
+    explainRoute: chatExplainRoute,
+    ...buildTaisceSessionDeps(),
+    ...(commandOpts.model !== undefined ? { initialModel: commandOpts.model } : {}),
+    ...(commandOpts.provider !== undefined ? { initialProvider: commandOpts.provider } : {}),
+  };
+
+  // Closing the session — /exit, Ctrl-D, or the terminal window (SIGHUP) — turns Ollama off
+  // again if this session used it or started it, so nothing sits in memory afterwards.
+  let ended = false;
+  const endOllama = async (): Promise<void> => {
+    if (ended) return;
+    ended = true;
+    if (!ollamaUse.used && !ollamaUse.started) return;
+    const result = await turnOffOllama();
+    process.stdout.write(`· ${result.message}\n`);
+  };
+  const onSignal = (): void => {
+    void endOllama().finally(() => process.exit(0));
+  };
+  process.once("SIGHUP", onSignal);
+  process.once("SIGTERM", onSignal);
+  try {
+    await runChatSession(deps);
+  } finally {
+    rl.close();
+    process.off("SIGHUP", onSignal);
+    process.off("SIGTERM", onSignal);
+    await endOllama();
+  }
+}
+
+export function registerChat(program: Command): void {
+  program
+    .command("chat")
+    .description("The session — brief, skills as /<name>, /edit, /model (same as `moss` alone)")
+    .option("--model <name>", "Pin the session model (changeable with /model)")
+    .option(
+      "--provider <id>",
+      "Pin the session provider lane (changeable with /provider)",
+      parseProvider,
+    )
+    .action(async (commandOpts: { model?: string; provider?: ProviderId }) => {
+      await startSession(commandOpts);
+    });
+}

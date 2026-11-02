@@ -1,0 +1,58 @@
+# automerge-policy.yml — tiered merge policy read by automerge.yml
+#
+# Copy to `.github/automerge-policy.yml` in the target repo, then tune the
+# EDIT-ME fields below. This file is read from the DEFAULT branch only, never
+# from a PR head (see automerge.yml) — a PR that edits this file cannot
+# change the rules that judge it.
+#
+# No AI opinion is ever merge authority. Every gate below is deterministic
+# and re-derived from the GitHub API at evaluation time — nothing here is
+# advisory except the explicitly-commented AI-review slot at the bottom.
+
+version: 1
+
+# Tier 0 — deterministic, zero human touch.
+# ALL of: author on this allow-list; same-repo branch only (never a fork);
+# every changed file (including both old and new names on a rename) inside
+# allow_paths; required checks green. No delay.
+tier0:
+  authors:
+    - github-actions[bot]
+    - dependabot[bot]
+  same_repo_only: true
+  # EDIT-ME per repo: generated data / reports / lockfile-only patch bumps —
+  # never source, never workflows, never docs that make claims.
+  allow_paths:
+    - "reports/**"
+
+# Tier 1 — Dependabot minor/patch bumps on CI-covered code paths.
+# Same author/same-repo/green-checks gates as Tier 0, plus: the PR must be a
+# parseable single-dependency semver bump ("Bump X from A.B.C to D.E.F") of
+# kind minor or patch (major, and any grouped/non-standard title, fails
+# closed — never Tier 1). Merges only after delay_hours have elapsed since
+# the PR was opened.
+tier1:
+  dependabot_semver:
+    - minor
+    - patch
+  delay_hours: 24
+
+# Tier 2 — never auto-merges, regardless of author. Loop-reviewed only
+# (daily-reconcile / week-planner PR sweep surfaces a code-review verdict);
+# Karl merges by hand. These paths are enforced in code by automerge.yml
+# and are NOT overridable by editing this file (the workflow hardcodes them
+# as a floor on top of whatever is listed here) — listed explicitly anyway
+# so the policy documents its own guardrail.
+tier2:
+  deny_paths:
+    - ".github/**"
+    - "Sources/**"
+    - ".github/automerge-policy.yml"
+
+# Advisory AI review — intentionally empty on purpose. Gemini's free
+# consumer reviewer sunsets 2026-07-17; Copilot review is not free. If a free,
+# reputable option appears, it plugs in here as PR-comment commentary only —
+# it must never gain a vote in the tier gates above.
+# advisory_ai_review:
+#   provider: ""
+#   mode: "comment-only"

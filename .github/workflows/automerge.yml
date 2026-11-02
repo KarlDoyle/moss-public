@@ -1,0 +1,319 @@
+name: automerge
+
+# automerge.yml — the sole enforcement point for the tiered merge policy on
+# repos where GitHub Free provides no branch protection / required-checks /
+# CODEOWNERS enforcement (private repos). On public repos it runs alongside
+# real branch protection as belt-and-braces; the logic is identical either
+# way so this file behaves the same when copied anywhere.
+#
+# STRUCTURAL GUARDRAIL (read this before editing anything else): a
+# `workflow_run` trigger always executes the version of THIS FILE committed
+# to the repository's DEFAULT branch — never the version on the head branch
+# of whatever PR triggered it. A PR that edits automerge.yml (or the policy
+# file it reads) therefore cannot change the rules that judge it. This is
+# the entire reason it is safe to let this workflow merge PRs on a repo with
+# no other enforcement available.
+#
+# Because of that, this workflow treats `workflow_run` (and `schedule`) as
+# nothing more than a wake-up call: it never trusts the triggering event's
+# payload for any decision. Every gate below (author, same-repo, changed
+# paths, check status, PR age) is re-derived fresh from the GitHub API
+# against the actual current state of each open PR, every time this runs.
+#
+# NEVER add a `pull_request` (or `pull_request_target`) trigger to this
+# workflow — that would let a PR's own event context influence the run
+# judging it, defeating the guardrail above.
+# NEVER call `gh pr merge --auto` anywhere in this file. On an unprotected
+# (private, free-plan) repo, `--auto` merges immediately with no branch
+# protection to defer to — it does not wait for checks. This workflow always
+# merges explicitly (`gh pr merge --squash --delete-branch`) only after its
+# own gates below have all passed.
+
+on:
+  workflow_run:
+    # EDIT-ME: must exactly match the `name:` field of this repo's CI
+    # workflow (the one whose green run is the trust signal). Read
+    # .github/workflows/ci.yml (or equivalent) to find it.
+    workflows: ["ci"]
+    types: [completed]
+  schedule:
+    # Six-hourly poll — how Tier 1's delay_hours elapses without a fresh CI
+    # run to wake this workflow up. (Hourly proved needlessly expensive:
+    # each run bills a 1-minute minimum, and an hourly cron across the
+    # private estate alone would exhaust the free Actions tier.)
+    - cron: "17 */6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  statuses: read
+  actions: read
+
+concurrency:
+  group: automerge
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    # If a workflow_run fired, only proceed when the run that completed
+    # succeeded — a failed CI run isn't a useful moment to re-evaluate.
+    # (Per-PR check status is independently re-checked below regardless;
+    # this is just to avoid spurious runs, not a trust decision.)
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout policy from the DEFAULT branch (never the PR head)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install PyYAML
+        run: pip install --quiet pyyaml
+
+      - name: Evaluate policy and merge eligible PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          python3 <<'PY'
+          import fnmatch
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          from datetime import datetime, timezone
+
+          import yaml
+
+          REPO = os.environ["GH_REPO"]
+
+          def gh(*args):
+              result = subprocess.run(["gh", *args], capture_output=True, text=True)
+              if result.returncode != 0:
+                  print(f"::warning::gh {' '.join(args)} failed: {result.stderr.strip()}")
+                  return None
+              return result.stdout
+
+          def gh_json(*args):
+              out = gh(*args)
+              if out is None or not out.strip():
+                  return None
+              return json.loads(out)
+
+          POLICY_PATH = ".github/automerge-policy.yml"
+          if not os.path.exists(POLICY_PATH):
+              print(f"No {POLICY_PATH} on the default branch -- nothing to do.")
+              sys.exit(0)
+
+          with open(POLICY_PATH) as f:
+              policy = yaml.safe_load(f) or {}
+
+          tier0 = policy.get("tier0", {}) or {}
+          tier1 = policy.get("tier1", {}) or {}
+          tier2 = policy.get("tier2", {}) or {}
+
+          tier0_authors = set(tier0.get("authors", []) or [])
+          tier0_allow_paths = tier0.get("allow_paths", []) or []
+          tier0_same_repo_only = tier0.get("same_repo_only", True)
+
+          tier1_semver = set(tier1.get("dependabot_semver", []) or [])
+          tier1_delay_hours = float(tier1.get("delay_hours", 24))
+
+          # Hardcoded floor: these deny paths always apply regardless of what
+          # the policy file says, so an edit to the policy can never loosen
+          # them (the policy file itself is one of them).
+          HARD_DENY = [".github/**", "Sources/**", POLICY_PATH]
+          deny_paths = list({*HARD_DENY, *(tier2.get("deny_paths", []) or [])})
+
+          def matches_any(path, patterns):
+              return any(fnmatch.fnmatch(path, pat) for pat in patterns)
+
+          def touched_paths(pr_number):
+              out = gh(
+                  "api", f"repos/{REPO}/pulls/{pr_number}/files", "--paginate",
+                  "-q", ".[] | {filename, previous_filename}",
+              )
+              paths = set()
+              if not out:
+                  return paths
+              for line in out.strip().splitlines():
+                  if not line.strip():
+                      continue
+                  try:
+                      entry = json.loads(line)
+                  except json.JSONDecodeError:
+                      continue
+                  if entry.get("filename"):
+                      paths.add(entry["filename"])
+                  if entry.get("previous_filename"):
+                      paths.add(entry["previous_filename"])
+              return paths
+
+          # Matches Dependabot's standard single-dependency PR title. Grouped
+          # updates and any non-standard title fail to match -- and therefore
+          # fail CLOSED (never Tier 1), not open.
+          SEMVER_RE = re.compile(
+              r"^Bump\s+\S+\s+from\s+(\d+)\.(\d+)\.(\d+\S*)\s+to\s+(\d+)\.(\d+)\.(\d+\S*)",
+              re.I,
+          )
+
+          def dependabot_bump_kind(title):
+              m = SEMVER_RE.match((title or "").strip())
+              if not m:
+                  return None
+              from_major, from_minor = int(m.group(1)), int(m.group(2))
+              to_major, to_minor = int(m.group(4)), int(m.group(5))
+              if to_major != from_major:
+                  return "major"
+              if to_minor != from_minor:
+                  return "minor"
+              return "patch"
+
+          def commit_checks_green(pr_number):
+              # Fallback for PRs whose head got CI via workflow_dispatch (e.g.
+              # GITHUB_TOKEN-authored seed PRs, which never trigger organic
+              # pull_request CI): dispatched runs do not appear in the PR's
+              # check rollup, but they DO create check-runs on the head
+              # commit. Same SHA, same CI, still fail-closed when empty.
+              head = gh_json("pr", "view", str(pr_number), "--repo", REPO,
+                             "--json", "headRefOid")
+              sha = (head or {}).get("headRefOid", "")
+              if not sha:
+                  return False, "no head SHA"
+              out = gh("api", f"repos/{REPO}/commits/{sha}/check-runs",
+                       "--jq", "[.check_runs[] | {name, status, conclusion}]")
+              if out is None:
+                  return False, "no checks reported"
+              try:
+                  runs = json.loads(out)
+              except json.JSONDecodeError:
+                  return False, "unparseable check-runs output"
+              runs = [r for r in runs if r.get("name") != "evaluate"]
+              if not runs:
+                  return False, "no checks reported"
+              bad = [r for r in runs
+                     if r.get("status") != "completed"
+                     or r.get("conclusion") not in ("success", "skipped")]
+              if bad:
+                  return False, f"not green (commit check-runs): {[r['name'] for r in bad]}"
+              return True, "all green (commit check-runs)"
+
+          def checks_green(pr_number):
+              out = gh("pr", "checks", str(pr_number), "--repo", REPO, "--json", "name,bucket")
+              if out is not None:
+                  try:
+                      checks = json.loads(out)
+                  except json.JSONDecodeError:
+                      return False, "unparseable checks output"
+                  if checks:
+                      bad = [c for c in checks if c.get("bucket") not in ("pass", "skipping")]
+                      if bad:
+                          return False, f"not green: {[c['name'] for c in bad]}"
+                      return True, "all green"
+              return commit_checks_green(pr_number)
+
+          def pr_age_hours(created_at):
+              created = datetime.strptime(created_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+              return (datetime.now(timezone.utc) - created).total_seconds() / 3600.0
+
+          def merge(pr_number, reason):
+              print(f"MERGE PR #{pr_number}: {reason}")
+              out = gh("pr", "merge", str(pr_number), "--repo", REPO, "--squash", "--delete-branch")
+              print(out or "")
+
+          prs = gh_json(
+              "pr", "list", "--repo", REPO, "--state", "open",
+              "--json", "number,author,isCrossRepository,createdAt,title,isDraft",
+              "--limit", "200",
+          ) or []
+
+          def canon(login):
+              # gh renders the same bot as "app/github-actions",
+              # "github-actions", or "github-actions[bot]" depending on
+              # the API path -- normalise before any allow-list check.
+              login = login or ""
+              if login.startswith("app/"):
+                  login = login[len("app/"):]
+              if login.endswith("[bot]"):
+                  login = login[: -len("[bot]")]
+              return login
+
+          tier0_authors_canon = {canon(a) for a in tier0_authors}
+
+          for pr in prs:
+              n = pr["number"]
+              author = canon((pr.get("author") or {}).get("login", ""))
+              title = pr.get("title", "")
+              is_fork = pr.get("isCrossRepository", False)
+              is_draft = pr.get("isDraft", False)
+              created_at = pr.get("createdAt")
+
+              print(f"--- PR #{n} by {author!r}: {title!r} ---")
+
+              if is_draft:
+                  print("skip: draft")
+                  continue
+              if tier0_same_repo_only and is_fork:
+                  print("skip: cross-repository (fork) PR -- never eligible")
+                  continue
+              if author not in tier0_authors_canon and author != "dependabot":
+                  print(f"skip: author {author!r} not on the automerge allow-list -- human PRs are always Tier 2")
+                  continue
+
+              paths = touched_paths(n)
+              if not paths:
+                  print("skip: could not determine changed files")
+                  continue
+
+              denied = [p for p in paths if matches_any(p, deny_paths)]
+              if denied:
+                  print(f"skip: touches deny-listed path(s) {denied} -- Tier 2, never auto-merges")
+                  continue
+
+              all_within_tier0_paths = bool(paths) and all(matches_any(p, tier0_allow_paths) for p in paths)
+
+              if author in tier0_authors_canon and all_within_tier0_paths:
+                  ok, why = checks_green(n)
+                  if not ok:
+                      print(f"tier0 candidate, not merging yet: {why}")
+                      continue
+                  merge(n, f"Tier 0 -- author {author} on allow-listed paths, checks green")
+                  continue
+
+              if author == "dependabot":
+                  if all_within_tier0_paths:
+                      ok, why = checks_green(n)
+                      if not ok:
+                          print(f"tier0 (dependabot, allow-listed paths) candidate, not merging yet: {why}")
+                          continue
+                      merge(n, "Tier 0 -- dependabot on allow-listed paths only, checks green")
+                      continue
+
+                  kind = dependabot_bump_kind(title)
+                  if kind not in tier1_semver:
+                      print(f"skip: dependabot bump kind {kind!r} not in tier1 allow-list {sorted(tier1_semver)} (fail-closed on unparseable/major titles)")
+                      continue
+                  age = pr_age_hours(created_at) if created_at else 0
+                  if age < tier1_delay_hours:
+                      print(f"tier1 candidate, waiting: age {age:.1f}h < delay {tier1_delay_hours}h")
+                      continue
+                  ok, why = checks_green(n)
+                  if not ok:
+                      print(f"tier1 candidate, not merging yet: {why}")
+                      continue
+                  merge(n, f"Tier 1 -- dependabot {kind} bump, age {age:.1f}h, checks green")
+                  continue
+
+              print("skip: no tier matched")
+          PY

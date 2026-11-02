@@ -1,0 +1,6 @@
+{
+  "enabled": true,
+  "approvedFolder": "tests/fixtures/docs",
+  "outputFolder": "output/docs",
+  "reviewQueuePath": "output/review/queue.json"
+}

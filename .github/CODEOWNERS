@@ -1,0 +1,8 @@
+# CODEOWNERS — maps each area of moss to the team that owns it.
+# Read by tools like `marshal route` to name the owning team for a ticket's code.
+# (Area handles are illustrative owning teams; the catch-all is a real owner.)
+*                     @KarlDoyle
+/src/lib/providers/   @moss/providers
+/src/lib/memory/      @moss/memory
+/src/lib/skills/      @moss/skills
+/src/commands/        @moss/cli

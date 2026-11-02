@@ -1,0 +1,46 @@
+{
+  "name": "moss",
+  "version": "0.1.1",
+  "private": true,
+  "type": "module",
+  "description": "Local-first AI CLI: deterministic model routing, read-only skills, opt-in memory.",
+  "engines": {
+    "node": ">=24",
+    "pnpm": ">=10"
+  },
+  "bin": {
+    "moss": "./src/cli.ts"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "echo \"build: nothing to build yet\"",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "test": "vitest run --coverage",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage",
+    "cli": "tsx ./src/cli.ts",
+    "dev": "tsx watch ./src/cli.ts",
+    "prepare": "git config core.hooksPath .githooks || true"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.14",
+    "@types/node": "^24.13.5",
+    "@vitest/coverage-v8": "^5.0.5",
+    "tsx": "^4.23.13",
+    "typescript": "7.0.2",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
+  },
+  "dependencies": {
+    "commander": "^14.0.3",
+    "execa": "^10.0.1",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.6"
+  },
+  "packageManager": "pnpm@11.5.2",
+  "license": "MIT"
+}

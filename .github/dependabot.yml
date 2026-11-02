@@ -1,0 +1,36 @@
+# Dependency updates, weekly. Minor + patch come as ONE grouped PR per ecosystem (safe;
+# merge when CI is green). Majors come in their OWN group PR so a breaking upgrade never
+# blocks the routine ones — take them as a planned upgrade. Never auto-merged by Dependabot.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    # @types/node tracks the RUNTIME, not the newest release: engines says Node 24 (the
+    # Active LTS), so the types stay on 24. Revisit when Node 26 becomes LTS (28 Oct 2026).
+    ignore:
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+    groups:
+      npm-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+      npm-major:
+        patterns: ["*"]
+        update-types: [major]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      github-actions-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+      github-actions-major:
+        patterns: ["*"]
+        update-types: [major]

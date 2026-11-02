@@ -1,0 +1,75 @@
+# moss routing policy — which lane runs which task, and what it may spend.
+#
+# Configure model choices and lane order for your own environment.
+#
+# Route down by default, up by stakes: route/brief/embed/vision stay local; reason/edit take
+# the best available Claude lane, else local. A front-door Gate of irreversible or
+# external-facing forces the best available lane of all, and the result is stage-only.
+last_reviewed: "2026-09-18"
+review_frequency: monthly
+
+tasks:
+  route: # classify, extract, capture routing
+    lanes: [ollama]
+    ollama: { model: "qwen2.5:3b-instruct", num_ctx: 4096, num_predict: 256 }
+  brief: # standup, capture, drafts, summaries
+    lanes: [ollama]
+    ollama: { model: "llama3.1:latest", num_ctx: 16384, num_predict: 1024 }
+  reason: # council, cross-domain, debriefs, gates
+    lanes: [claude-code, anthropic-api, ollama]
+    claude-code: { model: sonnet }
+    anthropic-api: { model: sonnet, max_tokens: 8192 }
+    ollama: { model: "gemma4:12b", num_ctx: 16384, num_predict: 2048 }
+  edit: # /edit — local: Aider architect (model) + editor (editor_model)
+    lanes: [claude-code, anthropic-api, ollama]
+    claude-code: { model: sonnet }
+    anthropic-api: { model: sonnet, max_tokens: 16000 }
+    ollama: { model: "llama3.1:latest", editor_model: "qwen2.5-coder:7b", num_ctx: 16384, num_predict: 2048 }
+  embed: # search / recall — not pulled yet: `ollama pull qwen3-embedding:0.6b` (0.4 GB)
+    lanes: [ollama]
+    ollama: { model: "qwen3-embedding:0.6b" }
+  vision: # images, screenshots — not pulled yet: `ollama pull gemma4:12b` (7.6 GB)
+    lanes: [ollama]
+    ollama: { model: "gemma4:12b", num_ctx: 16384, num_predict: 1024 }
+
+caps:
+  anthropic-api:
+    # OFF (2026-09-18): no API budget. While false the lane is skipped before any key is
+    # even looked up, so a key in the Keychain changes nothing. Turn on = one line here.
+    enabled: false
+    daily_eur: 2 # when on: refuse an API call that would take today's spend past this
+  claude-code:
+    sonnet_first: true # Sonnet for everything; Opus only when pinned (/model opus)
+
+# List prices are USD (src/lib/providers/metadata.ts); the cap is EUR.
+fx:
+  usd_to_eur: 0.8726
+  checked: "2026-09-18" # ECB reference rate via frankfurter.dev
+
+# A front-door gate that forces the best available lane, and stages the result.
+stakes:
+  gates: [irreversible, external-facing]
+  best_order: [claude-code, anthropic-api, ollama]
+
+# Skill → task type. A SKILL.md frontmatter `task:` (under metadata) wins over this.
+skills:
+  default: brief
+  standup: brief
+  capture: brief
+  shutdown: brief
+  week-planner: brief
+  daily-reconcile: brief
+  doc-standard: brief
+  karl-context-sync: brief
+  context-router: route
+  rubric-scoring: route
+  structured-extract: route
+  expert-council: reason
+  cross-domain: reason
+  grilling: reason
+  interview-prep: reason
+  interview-debrief: reason
+  claim-integrity: reason
+  brand-voice-check: reason
+  pre-publish: reason
+  publish-safety-guard: reason

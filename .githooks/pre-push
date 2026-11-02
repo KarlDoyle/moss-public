@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Moss pre-push gate.
+#
+# Blocks a push when the code or the docs have drifted. Runs:
+#   1. typecheck
+#   2. the test suite — which includes tests/boundaries/docs-surface.test.ts,
+#      the mechanical check that every registered command is documented in
+#      README.md and docs/OPERATOR_GUIDE.md.
+#
+# Enabled via `git config core.hooksPath .githooks` (set automatically by the
+# package.json `prepare` script on `pnpm install`).
+#
+# Skip in an emergency with `git push --no-verify`.
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+echo "pre-push: typecheck + tests (incl. docs-surface consistency)…"
+
+if ! pnpm typecheck; then
+  echo "pre-push: typecheck failed — push aborted." >&2
+  exit 1
+fi
+
+if ! pnpm test; then
+  echo "pre-push: tests failed — push aborted." >&2
+  echo "  If docs-surface failed, a command is registered but undocumented:" >&2
+  echo "  add it to README.md and the relevant docs/OPERATOR_GUIDE.md." >&2
+  exit 1
+fi
+
+echo "pre-push: OK."
