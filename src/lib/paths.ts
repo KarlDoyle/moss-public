@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, normalize, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,7 +65,13 @@ function ensureAbsolute(input: string): string {
 function realpathDeepestAncestor(target: string): string {
   let head = target;
   const tail: string[] = [];
-  while (!existsSync(head)) {
+  while (true) {
+    try {
+      lstatSync(head);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
     const parent = dirname(head);
     if (parent === head) {
       return target;

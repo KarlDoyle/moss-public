@@ -58,6 +58,7 @@ export interface SessionEditDeps {
     repo: string,
     diff: string,
     check: boolean,
+    files: readonly string[],
   ) => Promise<{ ok: boolean; output: string }>;
 }
 

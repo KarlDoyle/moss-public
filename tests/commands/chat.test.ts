@@ -424,7 +424,7 @@ describe("/edit — plan, dry-run diff, go?, apply, diff --stat", () => {
     const text = h.out.join("\n");
     expect(text).toContain("Did not apply edit (--dry-run)");
     expect(text).toContain("go? [y/N]");
-    expect(text).toContain("not applied. Nothing was written.");
+    expect(text).toContain("not applied. No target patch was applied.");
     expect(diffStat).not.toHaveBeenCalled();
     // The planning turn carried the privacy rules.
     expect(h.generate.mock.calls[0]?.[0].system).toContain(RULES);

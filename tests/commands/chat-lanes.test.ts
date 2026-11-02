@@ -130,11 +130,11 @@ describe("claudeDiff + applyPatch against a real repo", () => {
     ];
     expect(choice).toMatchObject({ lane: "claude-code", model: "opus" });
     expect(input.prompt).toContain("FILE a.py\n```\nx = 0\n");
-    expect((await applyPatch(repo, diff, true)).ok).toBe(true);
+    expect((await applyPatch(repo, diff, true, ["a.py"])).ok).toBe(true);
     expect(readFileSync(join(repo, "a.py"), "utf8")).toBe("x = 0\n");
-    expect((await applyPatch(repo, diff, false)).ok).toBe(true);
+    expect((await applyPatch(repo, diff, false, ["a.py"])).ok).toBe(true);
     expect(readFileSync(join(repo, "a.py"), "utf8")).toBe("x = 1\n");
-    const again = await applyPatch(repo, diff, true);
+    const again = await applyPatch(repo, diff, true, ["a.py"]);
     expect(again.ok).toBe(false);
     expect(again.output).toContain("patch does not apply");
   });

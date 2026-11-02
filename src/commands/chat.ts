@@ -9,7 +9,7 @@ import {
   pickFiles,
   tidyAiderOutput,
 } from "../lib/aider.ts";
-import { gitDiffStat, gitTopLevel, gitTrackedFiles } from "../lib/git.ts";
+import { assertSafeGitConfig, gitDiffStat, gitTopLevel, gitTrackedFiles } from "../lib/git.ts";
 import { defaultHealthCtx } from "../lib/health/context.ts";
 import { renderReport, runChecks } from "../lib/health/runner.ts";
 import { loadRoutingPolicy, taskForSkill } from "../lib/lanes/policy.ts";
@@ -196,6 +196,7 @@ export function buildTaisceSessionDeps(
       },
       coderModel: () => resolveCoderModel(),
       aider: async (repo, options) => {
+        await assertSafeGitConfig(repo);
         const result = await defaultAiderRunner(
           buildAiderArgs({ ...options, model: options.model ?? resolveCoderModel() }),
           repo,
@@ -209,7 +210,7 @@ export function buildTaisceSessionDeps(
       route: async (ask, pinned) =>
         editRoute(ask, pinned, present ? await runFrontDoorHook(ask, root) : null),
       claudeDiff: (repo, plan, files, route) => claudeDiff(repo, plan, files, route),
-      applyPatch: (repo, diff, check) => applyPatch(repo, diff, check),
+      applyPatch: (repo, diff, check, files) => applyPatch(repo, diff, check, files),
     },
   };
 }

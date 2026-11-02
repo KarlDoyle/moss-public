@@ -1,7 +1,6 @@
 // The session's lane wiring: every turn, /edit, /model and the route table go through
 // config/routing.yaml exactly like `moss run`. Kept apart from chat.ts so each stays short.
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { readFileSync } from "node:fs";
 import { gitApply } from "../lib/git.ts";
 import { renderLaneChoice } from "../lib/lanes/explain.ts";
 import { gatesIn, loadRoutingPolicy, type RoutingPolicy } from "../lib/lanes/policy.ts";
@@ -10,7 +9,7 @@ import { type LaneChoice, type SelectDeps, selectLane } from "../lib/lanes/selec
 import { pinForModel } from "../lib/lanes/skill-plan.ts";
 import { assertChatModel } from "../lib/ollama.ts";
 import { ollamaUse } from "../lib/ollama-lifecycle.ts";
-import { joinInsideProject, resolveInsideRepo } from "../lib/paths.ts";
+import { resolveInsideRepo } from "../lib/paths.ts";
 import { claudeModel, LANE_TASK_TYPES, type LaneTaskType } from "../lib/providers/metadata.ts";
 import type { ProviderGenerateResult } from "../lib/providers/types.ts";
 import type { EditRoute } from "../repl/edit.ts";
@@ -187,11 +186,13 @@ export async function claudeDiff(
   }
 }
 
-export async function applyPatch(repo: string, diff: string, check: boolean) {
-  const file = joinInsideProject("output", "edits", `edit-${Date.now()}.diff`);
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, diff);
-  return gitApply(repo, file, check);
+export async function applyPatch(
+  repo: string,
+  diff: string,
+  check: boolean,
+  files: readonly string[],
+) {
+  return gitApply(repo, diff, check, files);
 }
 
 // /model with no argument: the lane and model each task would take right now.

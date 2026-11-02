@@ -1,21 +1,16 @@
 // The two ways `/edit` applies a plan: Aider on the local lane, or one Claude-written
 // unified diff on a Claude lane. Split from edit.ts; the flow and its contract live there.
+
+import { textPatchPaths } from "../lib/patch.ts";
 import type { EditContext, EditRoute, SessionEditDeps } from "./edit.ts";
 
-// Paths a unified diff touches (`--- a/x` / `+++ b/x`), minus /dev/null.
-export function diffPaths(diff: string): string[] {
-  const paths = new Set<string>();
-  for (const m of diff.matchAll(/^(?:---|\+\+\+) (?:[ab]\/)?(\S+)/gm)) {
-    if (m[1] !== undefined && m[1] !== "/dev/null") paths.add(m[1]);
-  }
-  return [...paths];
-}
+export const diffPaths = textPatchPaths;
 
 async function askGo(ctx: EditContext): Promise<boolean> {
   ctx.out("go? [y/N]");
   const answer = ((await ctx.nextLine()) ?? "").trim().toLowerCase();
   if (["y", "yes", "go"].includes(answer)) return true;
-  ctx.out("not applied. Nothing was written.");
+  ctx.out("not applied. No target patch was applied.");
   return false;
 }
 
@@ -47,7 +42,9 @@ export async function claudeLane(
     ctx.err(`/edit: the ${route.lane} lane is not wired for edits in this session.`);
     return;
   }
-  ctx.out(`· ${route.lane} writing a unified diff with ${route.model} (nothing is written)…`);
+  ctx.out(
+    `· ${route.lane} preparing a unified diff with ${route.model} (patch text stays in memory)…`,
+  );
   const made = await edit.claudeDiff(repo, plan, files, route);
   if (!made.ok || made.diff === undefined || made.diff.trim().length === 0) {
     ctx.err(
@@ -56,14 +53,19 @@ export async function claudeLane(
     return;
   }
   ctx.out(made.diff.trimEnd());
-  const stray = diffPaths(made.diff).filter((p) => !files.includes(p));
-  if (stray.length > 0) {
-    ctx.err(
-      `/edit: the diff touches files outside the plan (${stray.join(", ")}); refused, nothing applied.`,
-    );
+  try {
+    const stray = diffPaths(made.diff).filter((p) => !files.includes(p));
+    if (stray.length > 0) {
+      ctx.err(
+        `/edit: the diff touches files outside the plan (${stray.join(", ")}); refused, nothing applied.`,
+      );
+      return;
+    }
+  } catch (error) {
+    ctx.err(`/edit: ${error instanceof Error ? error.message : String(error)} Nothing applied.`);
     return;
   }
-  const check = await edit.applyPatch(repo, made.diff, true);
+  const check = await edit.applyPatch(repo, made.diff, true, files);
   if (!check.ok) {
     ctx.err(
       `/edit: the diff does not apply cleanly (git apply --check: ${check.output.trim()}); nothing applied.`,
@@ -72,12 +74,12 @@ export async function claudeLane(
   }
   if (route.stageOnly) {
     ctx.out(
-      "STAGE-ONLY (front-door gate): the diff above is staged for you to read. Nothing was applied.",
+      "STAGE-ONLY (front-door gate): the diff above is shown for review. No target patch was applied.",
     );
     return;
   }
   if (!(await askGo(ctx))) return;
-  const applied = await edit.applyPatch(repo, made.diff, false);
+  const applied = await edit.applyPatch(repo, made.diff, false, files);
   if (!applied.ok) {
     ctx.err(`/edit: git apply failed: ${applied.output.trim()}`);
     return;
@@ -101,7 +103,7 @@ export async function localLane(
     ...(architect !== undefined ? { model: architect, editorModel: editor } : {}),
   };
   const who = architect !== undefined ? `architect ${architect} → editor ${editor}` : editor;
-  ctx.out(`· aider --dry-run with ${who} (nothing is written)…`);
+  ctx.out(`· aider --dry-run with ${who} (Moss has not applied a patch)…`);
   const dry = await edit.aider(repo, { ...opts, dryRun: true });
   ctx.out(dry.output.length > 0 ? dry.output : "(aider printed nothing)");
   if (dry.exitCode !== 0) {
