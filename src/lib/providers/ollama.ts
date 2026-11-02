@@ -102,6 +102,7 @@ export interface OllamaGenerateResult {
   // skill runner's router-backed default sets it (and may select a
   // non-Ollama lane); the bare Ollama path leaves it undefined. Lets the
   // usage log record the true provider instead of assuming Ollama.
+  readonly warnings?: readonly string[];
   readonly providerId?: string;
 }
 

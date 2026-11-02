@@ -68,6 +68,18 @@ function setup(route: EditRoute, answers: string[], overrides: Partial<SessionEd
 }
 
 describe("/edit on a Claude lane", () => {
+  it("shows accounting warnings even when a successful provider returns an empty diff", async () => {
+    const s = setup(claude, [], {
+      claudeDiff: async () => ({
+        ok: true,
+        diff: "\n",
+        warnings: ["Accounting incomplete: lane ledger write failed."],
+      }),
+    });
+    await runEdit(s.ctx, "set x in a.py");
+    expect(s.err).toContain("Accounting incomplete: lane ledger write failed.");
+    expect(s.applyPatch).not.toHaveBeenCalled();
+  });
   it("plans on the edit lane, shows the diff, checks it, and applies exactly that diff on go", async () => {
     const s = setup(claude, ["y"]);
     await runEdit(s.ctx, "set x in a.py");

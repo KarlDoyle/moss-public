@@ -188,6 +188,8 @@ export function formatRouteExplanationHuman(
         ? ` (execution: ${explanation.selectedExecutionType})`
         : "";
     lines.push(`Selected provider: ${explanation.selectedProvider}${execNote}.`);
+    if (explanation.selectedModel !== undefined)
+      lines.push(`Selected model: ${explanation.selectedModel}.`);
     if (explanation.selectedExecutionType === "manual_handoff") {
       lines.push(
         "Note: this is a manual-handoff lane. Moss will NOT execute the task; it will produce a structured packet for you to paste into the receiving agent.",
@@ -211,6 +213,9 @@ export function formatRouteExplanationHuman(
         .join(", ")}.`,
     );
   }
+  lines.push(
+    "Preview skips requested generation; availability probes may contact providers and write probe metadata.",
+  );
   if (options.footer !== undefined) {
     lines.push("");
     lines.push(options.footer);
@@ -225,6 +230,8 @@ export function formatRouteExplanationHuman(
 // a decision record.
 export function formatRouteExplanationJson(explanation: ProviderRouteExplanation): {
   readonly task: string;
+  readonly selectedModel?: string;
+  readonly models?: Partial<Record<ProviderId, string>>;
   readonly probedAt: string;
   readonly selectedProvider: ProviderId | null;
   readonly selectedExecutionType: ExecutionType | null;
@@ -242,6 +249,10 @@ export function formatRouteExplanationJson(explanation: ProviderRouteExplanation
   const rows = rowsFromExplanation(explanation);
   return {
     task: explanation.task,
+    ...(explanation.selectedModel !== undefined
+      ? { selectedModel: explanation.selectedModel }
+      : {}),
+    ...(explanation.models !== undefined ? { models: explanation.models } : {}),
     probedAt: explanation.probedAt,
     selectedProvider: explanation.selectedProvider,
     selectedExecutionType: explanation.selectedExecutionType,

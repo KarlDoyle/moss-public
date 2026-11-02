@@ -24,6 +24,10 @@
 // as `not_installed` with a stable reason string. T05/T06 fill the
 // registry; the router code does not change.
 
+import { accountingWarnings, eurSpent, localDay, readLedger } from "../lanes/ledger.ts";
+import { loadRoutingPolicy, type RoutingPolicy, settingsFor } from "../lanes/policy.ts";
+import { meteredRefusal } from "../lanes/select.ts";
+import { requestPins } from "../lanes/skill-plan.ts";
 import { NetworkBoundaryError } from "../net.ts";
 import { classifyGenerateFailure } from "./failure.ts";
 import {
@@ -123,6 +127,8 @@ export interface ProviderRouteExplanation {
   readonly unknownCapabilities: readonly { readonly id: ProviderId; readonly task: TaskId }[];
   readonly confidence?: number;
   readonly probedAt: string;
+  readonly selectedModel?: string;
+  readonly models?: Partial<Record<ProviderId, string>>;
 }
 
 export interface RouterDependencies {
@@ -134,6 +140,8 @@ export interface RouterDependencies {
   readonly getProvider: (id: ProviderId) => Provider | undefined;
   // Single `Date` source for `probedAt`. Injected so tests can pin it.
   readonly now: () => Date;
+  readonly policy?: () => RoutingPolicy;
+  readonly eurSpentToday?: (lane: ProviderId) => number;
 }
 
 export const defaultRouterDependencies: RouterDependencies = {
@@ -201,13 +209,6 @@ async function probeOne(id: ProviderId, deps: RouterDependencies): Promise<Provi
       lastProbedAt: deps.now().toISOString(),
     };
   }
-}
-
-async function probeAll(deps: RouterDependencies): Promise<readonly ProviderProbeResult[]> {
-  // Probes run in parallel; selection logic is order-stable because it
-  // scans `listProviders()` rather than the probe-completion order.
-  const ids = deps.listProviders();
-  return Promise.all(ids.map((id) => probeOne(id, deps)));
 }
 
 // -----------------------------------------------------------------------------
@@ -325,21 +326,113 @@ function buildExplanation(
 // Public entry points
 // -----------------------------------------------------------------------------
 
-// Returns the provider-level route explanation WITHOUT executing the
-// task. Used by `moss ask --explain` (T07) and by callers that want
-// to surface route metadata before dispatch.
-//
-// Distinct from `src/lib/route.ts:explainRoute` (M2), which is a
-// registry-model-level explanation used by `moss models --explain
-// <task>`. T07 will consolidate the two layers; for now the names are
-// kept separate so neither module shadows the other.
+export interface RouteRequest extends ProviderGenerateOptions {
+  readonly provider?: ProviderId;
+  readonly localOnly?: boolean;
+  // A registry-selected local default is not an explicit model pin. Hosted
+  // fallback resolves its own configured model instead of receiving a local id.
+  readonly modelIsDefault?: boolean;
+}
+
+function laneOptions(
+  task: TaskId,
+  id: ProviderId,
+  policy: RoutingPolicy,
+  request: Partial<RouteRequest>,
+): ProviderGenerateOptions {
+  const settings = settingsFor(policy, task === "code-review" ? "reason" : "brief", id);
+  const model =
+    request.model !== undefined &&
+    (!request.modelIsDefault || id === "ollama" || id === "litellm" || id === "cursor-manual")
+      ? request.model
+      : settings?.model;
+  return {
+    task,
+    prompt: request.prompt ?? "",
+    ...(model !== undefined ? { model } : {}),
+    ...(request.system !== undefined ? { system: request.system } : {}),
+    ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
+    ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {}),
+    ...(id === "anthropic-api"
+      ? { maxTokens: request.maxTokens ?? settings?.max_tokens ?? settings?.num_predict ?? 8192 }
+      : request.maxTokens !== undefined
+        ? { maxTokens: request.maxTokens }
+        : {}),
+    ...(request.numCtx !== undefined ? { numCtx: request.numCtx } : {}),
+  };
+}
+
+function apiRefusal(
+  deps: RouterDependencies,
+  policy: RoutingPolicy,
+  options: ProviderGenerateOptions,
+): string | null {
+  return meteredRefusal(
+    policy,
+    options.model ?? "sonnet",
+    Math.ceil(((options.system ?? "") + options.prompt).length / 4),
+    options.maxTokens ?? 8192,
+    () =>
+      deps.eurSpentToday?.("anthropic-api") ??
+      eurSpent(readLedger(), "anthropic-api", localDay(deps.now())),
+  );
+}
+
+async function requestRoute(
+  task: TaskId,
+  deps: RouterDependencies,
+  request: Partial<RouteRequest>,
+) {
+  const policy = (deps.policy ?? loadRoutingPolicy)();
+  const pins = requestPins(
+    request.modelIsDefault ? undefined : request.model,
+    request.provider,
+    request.localOnly,
+  );
+  const ids = deps
+    .listProviders()
+    .filter((id) => pins.pinLane === undefined || pins.pinLane === id);
+  const options = new Map(ids.map((id) => [id, laneOptions(task, id, policy, request)]));
+  const probes = await Promise.all(
+    ids.map(async (id) => {
+      if (id === "anthropic-api" && deps.getProvider(id) !== undefined) {
+        const refusal = apiRefusal(deps, policy, options.get(id) as ProviderGenerateOptions);
+        if (refusal !== null)
+          return {
+            id,
+            status: "disabled" as const,
+            reason: refusal,
+            capabilities: { ask: "disabled" as const, "code-review": "disabled" as const },
+            lastProbedAt: deps.now().toISOString(),
+          };
+      }
+      return probeOne(id, deps);
+    }),
+  );
+  const built = buildExplanation(task, ids, probes, deps);
+  // Manual handoff is never an automatic executor fallback.
+  const explanation: ProviderRouteExplanation = {
+    ...built,
+    fallbackProviders: built.fallbackProviders.filter((id) => {
+      const type = deps.getProvider(id)?.executionType;
+      return type === "local_dispatch" || type === "remote_dispatch";
+    }),
+    models: Object.fromEntries(ids.map((id) => [id, options.get(id)?.model])),
+    ...(built.selectedProvider !== null && options.get(built.selectedProvider)?.model !== undefined
+      ? { selectedModel: options.get(built.selectedProvider)?.model as string }
+      : {}),
+  };
+  return { explanation, options, policy };
+}
+
+// Preview and execution resolve the same request, policy checks, pins, models and
+// fallback list. Probes may have documented effects; no requested generation runs.
 export async function explainProviderRoute(
   task: TaskId,
   deps: RouterDependencies = defaultRouterDependencies,
+  request: Partial<RouteRequest> = {},
 ): Promise<ProviderRouteExplanation> {
-  const ids = deps.listProviders();
-  const probes = await probeAll(deps);
-  return buildExplanation(task, ids, probes, deps);
+  return (await requestRoute(task, deps, request)).explanation;
 }
 
 // Executes the task against the selected provider. Returns the result
@@ -350,15 +443,14 @@ export async function explainProviderRoute(
 // callers would have received from `explainProviderRoute(task)`.
 export async function routeAndGenerate(
   task: TaskId,
-  options: ProviderGenerateOptions,
+  options: RouteRequest,
   deps: RouterDependencies = defaultRouterDependencies,
 ): Promise<{
   readonly result: ProviderGenerateResult;
   readonly explanation: ProviderRouteExplanation;
 }> {
-  const ids = deps.listProviders();
-  const probes = await probeAll(deps);
-  const explanation = buildExplanation(task, ids, probes, deps);
+  const resolved = await requestRoute(task, deps, options);
+  const { explanation } = resolved;
   if (explanation.selectedProvider === null) {
     throw new NoProviderAvailableError(task, explanation);
   }
@@ -374,8 +466,7 @@ export async function routeAndGenerate(
   // The returned `explanation` is the pre-dispatch routing DECISION and is
   // left unchanged (deterministic, identical to explainProviderRoute); the
   // lane that actually served is carried on `result.providerId` (D-0019).
-  // Note: the same `options.model` is re-used across lanes; per-lane model
-  // resolution is M14's concern, not M11's.
+  // Per-lane options resolve a default model; explicit pins never broaden.
   const attemptOrder: readonly ProviderId[] = [
     explanation.selectedProvider,
     ...explanation.fallbackProviders,
@@ -402,9 +493,16 @@ export async function routeAndGenerate(
     if (isFallback && !dispatches) {
       continue;
     }
+    const effective = resolved.options.get(id) as ProviderGenerateOptions;
+    // Recheck immediately before every attempt, including retries/fallback.
+    if (id === "anthropic-api") {
+      const refusal = apiRefusal(deps, (deps.policy ?? loadRoutingPolicy)(), effective);
+      if (refusal !== null) throw new Error(refusal);
+    }
     try {
-      const result = await provider.generate(options);
-      return { result, explanation };
+      const result = await provider.generate(effective);
+      const warnings = [...(result.warnings ?? []), ...accountingWarnings(result)];
+      return { result: { ...result, ...(warnings.length > 0 ? { warnings } : {}) }, explanation };
     } catch (error) {
       if (classifyGenerateFailure(error) === "terminal") {
         throw error;

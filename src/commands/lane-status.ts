@@ -17,6 +17,7 @@ export interface LaneStatus {
   readonly resident: readonly string[] | null; // null = could not ask Ollama
   readonly today: readonly LaneUsage[];
   readonly bench: ReturnType<typeof lastBench>;
+  readonly accountingIssues?: readonly string[];
 }
 
 export interface LaneStatusDeps {
@@ -59,10 +60,18 @@ export async function gatherLaneStatus(
     deps.resident(),
   ]);
   const day = localDay(deps.now());
+  let today: LaneUsage[] = [];
+  const accountingIssues: string[] = [];
+  try {
+    today = deps.ledger().filter((e) => localDay(new Date(e.ts)) === day);
+  } catch {
+    accountingIssues.push("Accounting incomplete: ledger could not establish recorded totals.");
+  }
   return {
     lanes,
     resident,
-    today: deps.ledger().filter((e) => localDay(new Date(e.ts)) === day),
+    ...(accountingIssues.length > 0 ? { accountingIssues } : {}),
+    today,
     bench: lastBench(deps.bench()),
   };
 }
@@ -79,11 +88,22 @@ export function formatLaneStatus(s: LaneStatus): string {
   );
   const spend = ROUTED_LANES.map((id) => {
     const calls = s.today.filter((e) => e.lane === id);
-    const eur = calls.reduce((sum, e) => sum + (e.eur ?? 0), 0);
+    const eur =
+      calls.some((e) => e.eur === undefined || !Number.isFinite(e.eur) || e.eur < 0) &&
+      id === "anthropic-api"
+        ? Number.NaN
+        : calls.reduce((sum, e) => sum + (e.eur ?? 0), 0);
     const billing =
-      id === "anthropic-api" ? `€${eur.toFixed(2)}` : id === "claude-code" ? "sub" : "€0";
-    return `${id} ${calls.length} call${calls.length === 1 ? "" : "s"} (${billing})`;
+      id === "anthropic-api"
+        ? s.accountingIssues?.length || !Number.isFinite(eur) || eur < 0
+          ? "unknown"
+          : `€${eur.toFixed(2)}`
+        : id === "claude-code"
+          ? "sub"
+          : "€0";
+    return `${id} ${s.accountingIssues?.length ? "unknown" : calls.length} call${calls.length === 1 ? "" : "s"} (${billing})`;
   });
+  for (const issue of s.accountingIssues ?? []) rows.push(`  ${issue}`);
   rows.push(`  today's spend:  ${spend.join(" · ")}`);
   rows.push(
     `  last bench:     ${s.bench === null ? "never — run `moss bench`" : `${s.bench.ts.slice(0, 16).replace("T", " ")} UTC, ${s.bench.passed}/${s.bench.models} models passed`}`,

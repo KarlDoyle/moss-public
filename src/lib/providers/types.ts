@@ -215,6 +215,7 @@ export interface ProviderGenerateResult {
   readonly providerId: ProviderId;
   readonly model: string;
   readonly response: string;
+  readonly warnings?: readonly string[];
   readonly durationMs?: number;
   // Token usage reported by the provider for this generation, when it
   // exposes one (e.g. Ollama's prompt_eval_count / eval_count). Optional

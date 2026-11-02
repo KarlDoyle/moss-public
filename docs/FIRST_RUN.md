@@ -9,7 +9,7 @@ Moss is an experimental, local-first AI orchestration CLI. It routes tasks throu
 - Git for diff reviews and edit workflows; optional Aider on PATH for local `/edit`
 - Ollama for local model execution
 - Optional: Claude Code CLI, installed and authenticated, for the `claude-code` lane
-- Optional: an Anthropic API key for metered API use; disabled by default **only in the task-policy router** (see [cap limits](../LIMITATIONS.md#spend-cap-and-accounting))
+- Optional: an Anthropic API key for metered API use; disabled by default on both routing paths (see [cap limits](../LIMITATIONS.md#spend-cap-and-accounting))
 - Examples assume a POSIX shell. Keychain retrieval, `open -a Ollama` lifecycle and machine/scheduler checks target macOS; on other systems start Ollama yourself. The core Node CLI does not establish cross-platform support for every operator integration.
 
 ## Install from source
@@ -40,18 +40,18 @@ With Ollama already running and `llama3.1:latest` pulled:
 
 ```bash
 TAISCE_ROOT=/tmp/moss-public-no-workspace MOSS_NO_OLLAMA_LIFECYCLE=1 \
-  pnpm exec tsx ./src/cli.ts --explain ask "Explain what a CLI is."
+  pnpm exec tsx ./src/cli.ts --explain ask --provider ollama --model llama3.1:latest "Explain what a CLI is."
 ```
 
-Choose an absent temporary directory for `TAISCE_ROOT`: this disables optional external workspace hooks for this example. The global preview selects only the configured `brief` lane (Ollama) here, reads its local model list, and returns before dispatch. It does not start Ollama or pull a model. If no suitable model is available, it reports no route; this is not a generated answer.
+Choose an absent temporary directory for `TAISCE_ROOT` to disable optional workspace hooks. This preview pins the local provider/model, runs only its availability probe and returns without generation. It does not start Ollama or pull a model. The explicit model avoids needing a registry.
 
-The [captured preview](assets/route-preview.png) shows lane, model and rationale. Global `--explain ask` previews task-policy routing used by the default session; standalone `ask` still uses an older router. To inspect the latter without hosted probing, use:
+The committed [capture](assets/route-preview.png) is a historical task-policy preview from before remediation. Current global and standalone ask previews use the same request parser and resolver; their output differs from that image. The equivalent standalone form is:
 
 ```bash
-pnpm exec tsx ./src/cli.ts ask --provider ollama --explain
+pnpm exec tsx ./src/cli.ts ask --provider ollama --model llama3.1:latest --explain
 ```
 
-This provider-level preview does not resolve a model. See [routing limitations](../LIMITATIONS.md#models-and-routing).
+Both forms resolve the model and eligible fallback list. Unpinned previews may use hosted availability probes; see [routing limitations](../LIMITATIONS.md#models-and-routing).
 
 ## Run a local request
 
@@ -69,7 +69,7 @@ Unlike inspection, this sends a prompt to Ollama and performs local model infere
 ## Hosted and manual lanes
 
 - **Claude Code:** install and authenticate the `claude` CLI. Moss probes readiness and dispatches through the isolated CLI invocation.
-- **Anthropic API:** supply `ANTHROPIC_API_KEY` through your environment or configure the macOS Keychain item `anthropic-api-key` for the current user. Do not place credentials in the checkout. Enable the lane in `config/routing.yaml` for task-policy calls; its local estimated budget does not cover older `ask`/legacy chat routes or other tools.
+- **Anthropic API:** supply `ANTHROPIC_API_KEY` through your environment or configure the macOS Keychain item `anthropic-api-key` for the current user. Do not place credentials in the checkout. Enable the lane in `config/routing.yaml` for routed calls. Both routing engines enforce the switch and advisory local estimate; it is not a provider-side budget or a limit on other tools.
 - **Cursor manual:** Moss creates a handoff packet for you to paste into another tool. It does not run Cursor or claim that the task was executed.
 
 `api` and `sub` describe companion shell functions; the CLI cannot change its parent shell environment. External Taisce skills/hooks require a separate workspace selected with `TAISCE_ROOT`; they are not bundled setup requirements. Before hosted use, review [spend and execution boundaries](../LIMITATIONS.md).

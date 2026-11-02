@@ -11,10 +11,16 @@ function costLine(choice: LaneChoice): string {
     case "local":
       return `€0 (local) · ${tokens}`;
     case "sub":
-      return `subscription (no per-call bill; ~$${(e.usd ?? 0).toFixed(4)} at API list price) · ${tokens}`;
+      return e.usd === undefined
+        ? `subscription (list-price estimate unknown) · ${tokens}`
+        : `subscription (no per-call bill; ~$${e.usd.toFixed(4)} at API list price) · ${tokens}`;
     case "eur":
-      return `up to ~€${(e.eur ?? 0).toFixed(4)} (metered, counts toward the daily cap) · ${tokens}`;
-    default:
+      return e.eur === undefined
+        ? `metered cost unknown · ${tokens}`
+        : `up to ~€${e.eur.toFixed(4)} (metered, counts toward the daily cap) · ${tokens}`;
+    case "unknown":
+      return `cost unknown (upstream billing is not measured) · ${tokens}`;
+    case "manual":
       return `manual handoff, nothing called · ${tokens}`;
   }
 }
@@ -35,7 +41,7 @@ export function renderLaneChoice(choice: LaneChoice, heading: string, context?: 
   lines.push(`  cost:   ${costLine(choice)}`);
   lines.push(
     choice.stageOnly
-      ? `  gate:   ${choice.gates.join(" + ")} — STAGE-ONLY: shown, never applied or sent`
+      ? `  gate:   ${choice.gates.join(" + ")} — STAGE-ONLY: output shown; model input may be dispatched, proposed action not applied`
       : "  gate:   none",
   );
   return lines.join("\n");
