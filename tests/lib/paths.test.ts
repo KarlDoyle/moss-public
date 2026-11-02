@@ -205,6 +205,42 @@ describe("Taisce guard-reads (mirrors scripts/hooks/guard-reads.sh)", () => {
     );
   });
 
+  it.each([
+    ["quoted value with comment", '---\nsensitivity: "highly_private" # gated\n---\nbody\n'],
+    ["quoted key and plain value", "---\n'sensitivity': highly_private\n---\nbody\n"],
+    ["explicit-only with comment", "---\nload_policy: explicit_only # gated\n---\nbody\n"],
+    [
+      "label beyond the old scan window",
+      `---\n${"note: ordinary\n".repeat(45)}sensitivity: highly_private\n---\nbody\n`,
+    ],
+    ["private label", "---\nsensitivity: private\n---\nbody\n"],
+  ])("parses and denies semantic YAML sensitivity labels: %s", (_name, contents) => {
+    mkdirSync(join(taisceRoot, "Domains"), { recursive: true });
+    const path = "Domains/yaml-gated.md";
+    writeFileSync(join(taisceRoot, path), contents);
+    expect(() => assertTaiscePathReadable(taisceRoot, path)).toThrowError(TaisceGuardedPathError);
+  });
+
+  it.each([
+    "---\nsensitivity: [highly_private\n---\nbody\n",
+    "---\nsensitivity: unrecognised\n---\nbody\n",
+    "---\nload_policy: [default, explicit_only]\n---\nbody\n",
+    `---\n${"note: x\n".repeat(9_000)}---\nbody\n`,
+  ])("fails closed for malformed, unknown, or oversized frontmatter", (contents) => {
+    mkdirSync(join(taisceRoot, "Domains"), { recursive: true });
+    const path = "Domains/ambiguous.md";
+    writeFileSync(join(taisceRoot, path), contents);
+    expect(() => assertTaiscePathReadable(taisceRoot, path)).toThrowError(TaisceGuardedPathError);
+  });
+
+  it("allows a valid public label and ordinary non-sensitive frontmatter", () => {
+    mkdirSync(join(taisceRoot, "Domains"), { recursive: true });
+    writeFileSync(join(taisceRoot, "Domains/public.md"), "---\nsensitivity: public\n---\nbody\n");
+    writeFileSync(join(taisceRoot, "Domains/ordinary.md"), "---\ntitle: Fixture\n---\nbody\n");
+    expect(() => assertTaiscePathReadable(taisceRoot, "Domains/public.md")).not.toThrow();
+    expect(() => assertTaiscePathReadable(taisceRoot, "Domains/ordinary.md")).not.toThrow();
+  });
+
   it.each(["0", "false"])("does not treat TAISCE_ALLOW_SENSITIVE=%s as enabled", (value) => {
     process.env.TAISCE_ALLOW_SENSITIVE = value;
     expect(() => assertTaiscePathReadable(taisceRoot, "Sources/Family/x.md")).toThrowError(
@@ -216,6 +252,16 @@ describe("Taisce guard-reads (mirrors scripts/hooks/guard-reads.sh)", () => {
     process.env.TAISCE_ALLOW_SENSITIVE = "1";
     expect(() => assertTaiscePathReadable(taisceRoot, "Sources/Family/x.md")).not.toThrow();
     expect(() => assertTaiscePathReadable(taisceRoot, "../../etc/passwd")).toThrowError(
+      TaiscePathOutsideRootError,
+    );
+  });
+
+  it("the explicit override also bypasses a malformed label, while confinement still applies", () => {
+    mkdirSync(join(taisceRoot, "Domains"), { recursive: true });
+    writeFileSync(join(taisceRoot, "Domains/malformed.md"), "---\nsensitivity: [\n---\n");
+    process.env.TAISCE_ALLOW_SENSITIVE = "1";
+    expect(() => assertTaiscePathReadable(taisceRoot, "Domains/malformed.md")).not.toThrow();
+    expect(() => assertTaiscePathReadable(taisceRoot, "../../outside.md")).toThrowError(
       TaiscePathOutsideRootError,
     );
   });

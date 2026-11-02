@@ -199,8 +199,8 @@ describe("runChatSession", () => {
   });
 
   it("evicts oldest turns to keep the transcript within the byte budget", async () => {
-    // 200-byte budget; each turn pair is well over that, so only the most
-    // recent turn(s) survive — the carried prompt must never grow unbounded.
+    // 200-byte budget; oversized responses are clipped and old pairs are
+    // evicted before the next request is assembled.
     const big = "x".repeat(150);
     const bigEcho = async (_p: ChatGenerateParams): Promise<ChatGenerateResult> => ({
       ok: true,
@@ -212,11 +212,53 @@ describe("runChatSession", () => {
     });
     await runChatSession(h.deps);
     // Without eviction the transcript would hold 6 turns (900 bytes); the
-    // budget keeps only the most recent turn.
-    expect(h.out.join("\n")).toContain("turns:    1");
+    // bounded latest user/assistant pair survives.
+    expect(h.out.join("\n")).toContain("turns:    2");
     const statusLine = h.out.find((l) => l.startsWith("context:")) ?? "";
     const kib = Number(statusLine.match(/~([0-9.]+) KiB/)?.[1]);
     expect(kib).toBeLessThanOrEqual(0.2);
+  });
+
+  it("refuses a request whose system header and prompt exceed the aggregate byte budget", async () => {
+    const h = harness(["x".repeat(40), "/exit"], echo, {
+      maxContextBytes: 100,
+      guardrails: () => "sensitive rules ".repeat(8),
+    });
+    await runChatSession(h.deps);
+    expect(h.generate).not.toHaveBeenCalled();
+    expect(h.err.join("\n")).toMatch(/combined prompt and system context limit is 100 bytes/);
+  });
+
+  it("counts multibyte prompts and many loaded files in the same aggregate budget", async () => {
+    const h = harness(["/read a.md", "/read b.md", "é".repeat(30), "/exit"], echo, {
+      maxContextBytes: 100,
+      readFile: () => "é".repeat(24),
+    });
+    await runChatSession(h.deps);
+    expect(h.generate).not.toHaveBeenCalled();
+    expect(h.err.join("\n")).toContain("combined prompt and system context limit is 100 bytes");
+  });
+
+  it("preserves retained turns when the current prompt alone is oversized", async () => {
+    const h = harness(["short", "x".repeat(101), "/status", "/exit"], echo, {
+      maxContextBytes: 100,
+    });
+    await runChatSession(h.deps);
+    expect(h.generate).toHaveBeenCalledOnce();
+    expect(h.err.join("\n")).toContain("combined prompt and system context limit is 100 bytes");
+    expect(h.out.join("\n")).toContain("turns:    2");
+  });
+
+  it("truncates an oversized provider response on a UTF-8 boundary before retaining it", async () => {
+    const bigResponse = "é".repeat(1000);
+    const h = harness(["x", "/exit"], async () => ({ ok: true, response: bigResponse }), {
+      maxContextBytes: 32,
+    });
+    await runChatSession(h.deps);
+    const response = h.out.find((line) => line.startsWith("é")) ?? "";
+    expect(response).toBe("é".repeat(15));
+    expect(Buffer.byteLength(response, "utf8")).toBe(30);
+    expect(h.err.join("\n")).toContain("Response truncated to 30 bytes");
   });
 });
 

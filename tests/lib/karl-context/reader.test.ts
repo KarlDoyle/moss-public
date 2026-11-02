@@ -1,14 +1,18 @@
-import { relative, sep } from "node:path";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, relative, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 import { resolveKarlContextRoot } from "../../../src/lib/karl-context/confine.ts";
 import { formatPacketProvenance } from "../../../src/lib/karl-context/provenance.ts";
 import {
   assembleContextPacket,
+  defaultKarlContextReaderDeps,
   globToRegExp,
   KarlContextProfileError,
   type KarlContextReaderDeps,
 } from "../../../src/lib/karl-context/reader.ts";
 import type { KarlContextConfig } from "../../../src/lib/karl-context/types.ts";
+import { truncateUtf8 } from "../../../src/lib/utf8.ts";
 
 const ROOT = resolveKarlContextRoot(process.cwd());
 
@@ -41,7 +45,11 @@ function relKey(absDir: string): string {
 function fakeDeps(bytesPerFile = 10): KarlContextReaderDeps {
   return {
     listDir: async (dir) => TREE[relKey(dir)] ?? [],
-    readFile: async (abs) => `${"x".repeat(bytesPerFile)} <${relKey(abs)}>`,
+    readFile: async (abs, maxBytes) => {
+      const source = `${"x".repeat(bytesPerFile)} <${relKey(abs)}>`;
+      const content = truncateUtf8(source, maxBytes);
+      return { content, truncated: Buffer.byteLength(source, "utf8") > maxBytes };
+    },
   };
 }
 
@@ -107,6 +115,54 @@ describe("src/lib/karl-context/reader.ts", () => {
     expect(capped.truncated).toBe(true);
     expect(capped.files.length).toBeLessThan(4);
     expect(capped.files.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("truncates an oversized first profile file to the configured byte cap", async () => {
+    const packet = await assembleContextPacket(
+      config({ first: ["Domains/Career/profile.md"] }, 10),
+      "first",
+      fakeDeps(10_000),
+    );
+    expect(packet.files).toHaveLength(1);
+    expect(packet.files[0]?.bytes).toBe(10);
+    expect(packet.totalBytes).toBe(10);
+    expect(packet.truncated).toBe(true);
+    expect(Buffer.byteLength(packet.renderedContext, "utf8")).toBeGreaterThan(10);
+  });
+
+  it("does not split a multibyte code point when the first profile file is capped", async () => {
+    const packet = await assembleContextPacket(
+      config({ first: ["Domains/Career/profile.md"] }, 4),
+      "first",
+      {
+        ...fakeDeps(),
+        readFile: async () => ({ content: "éé", truncated: true }),
+      },
+    );
+    expect(packet.files[0]?.bytes).toBe(4);
+    expect(packet.renderedContext).toContain("éé");
+    expect(Buffer.byteLength(packet.renderedContext, "utf8")).toBeGreaterThan(4);
+  });
+
+  it("reads only a bounded prefix from a large synthetic first profile file", async () => {
+    const root = mkdtempSync(join(tmpdir(), "moss-context-large-"));
+    try {
+      writeFileSync(join(root, "large.md"), "é".repeat(100_000), "utf8");
+      const packet = await assembleContextPacket(
+        {
+          ...config({ first: ["**"] }, 10),
+          path: root,
+          alwaysExclude: [],
+        },
+        "first",
+        defaultKarlContextReaderDeps,
+      );
+      expect(packet.files[0]?.bytes).toBe(10);
+      expect(packet.truncated).toBe(true);
+      expect(packet.renderedContext).toContain("ééééé");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("throws on an unknown profile", async () => {

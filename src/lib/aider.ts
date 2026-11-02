@@ -7,14 +7,22 @@
 //   dry run  — `--dry-run`: prints the would-be diff, touches nothing.
 //   apply    — `--no-dry-run`: only after the operator typed "go" at the session prompt.
 //
-// Both runs are non-interactive (`--yes-always`), so every Aider feature that would act on a
-// "yes" is switched off explicitly: shell-command suggestions (it would run them), URL
-// detection (it would fetch them), auto-lint (a second, unreviewed edit round), .gitignore
-// edits, and commits of any kind. The repo map is off too (`--map-tokens 0`): Aider sees
-// only the files the plan names, which is also what makes the guard-reads check below
-// meaningful — Aider cannot wander into a gated file on its own.
+// The configured flags disable known automatic actions such as shell suggestions,
+// URL detection, auto-lint, .gitignore edits, and commits. They do not sandbox the
+// child process or prove it reads/writes only the selected files. Moss canonicalizes
+// those paths immediately before handoff; Aider's complete behavior remains unverified.
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { run } from "./exec.ts";
 import { OLLAMA_BASE_URL } from "./ollama.ts";
+
+export class AiderFileScopeError extends Error {
+  constructor(file: string, reason: string) {
+    super(`Aider file '${file}' ${reason}.`);
+    this.name = "AiderFileScopeError";
+  }
+}
 
 // A local 7B model through Aider: ~11s for a one-file edit measured 2026-09-18, but a big
 // file at ~20 tok/s takes minutes. Ten minutes, and nothing is billed while it waits.
@@ -31,6 +39,11 @@ export interface AiderRunOptions {
 }
 
 export function buildAiderArgs(options: AiderRunOptions): string[] {
+  for (const file of options.files) {
+    if (file.split(/[\\/]/).some((part) => part.startsWith("-"))) {
+      throw new AiderFileScopeError(file, "looks like an option and cannot be passed safely");
+    }
+  }
   return [
     "--model",
     `ollama_chat/${options.model}`,
@@ -70,15 +83,102 @@ export interface AiderResult {
 
 export type AiderRunner = (args: readonly string[], cwd: string) => Promise<AiderResult>;
 
-export const defaultAiderRunner: AiderRunner = async (args, cwd) => {
-  const result = await run("aider", args, {
-    cwd,
-    timeoutMs: AIDER_TIMEOUT_MS,
-    allowFailure: true,
-    env: { OLLAMA_API_BASE: OLLAMA_BASE_URL },
+function isUnderRoot(path: string, root: string): boolean {
+  const rel = relative(root, path);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+// Resolve every file immediately before invoking Aider and pass only canonical
+// repo-relative regular-file paths. Aider is a child process, not a sandbox.
+export function canonicalAiderFiles(repo: string, files: readonly string[]): string[] {
+  const root = realpathSync(repo);
+  return files.map((file) => {
+    if (isAbsolute(file) || file.split(/[\\/]/).includes("..")) {
+      throw new AiderFileScopeError(file, "is not a canonical relative path");
+    }
+    let canonical: string;
+    try {
+      canonical = realpathSync(resolve(root, file));
+    } catch {
+      throw new AiderFileScopeError(file, "does not resolve to an existing file");
+    }
+    if (!isUnderRoot(canonical, root)) {
+      throw new AiderFileScopeError(file, "resolves outside the target repository");
+    }
+    try {
+      if (!statSync(canonical).isFile()) {
+        throw new AiderFileScopeError(file, "does not resolve to a regular file");
+      }
+    } catch (error) {
+      if (error instanceof AiderFileScopeError) throw error;
+      throw new AiderFileScopeError(file, "cannot be inspected safely");
+    }
+    const canonicalRelative = relative(root, canonical).split(sep).join("/");
+    if (canonicalRelative.split("/").some((part) => part.startsWith("-"))) {
+      throw new AiderFileScopeError(file, "resolves to an option-like filename");
+    }
+    return canonicalRelative;
   });
-  const output = [result.stdout, result.stderr].filter((s) => s.trim().length > 0).join("\n");
-  return { exitCode: result.exitCode, output };
+}
+
+export async function runAiderConfined(
+  repo: string,
+  options: AiderRunOptions,
+  runner: AiderRunner = defaultAiderRunner,
+): Promise<AiderResult> {
+  const root = realpathSync(repo);
+  const files = canonicalAiderFiles(root, options.files);
+  const args = buildAiderArgs({ ...options, files });
+  return runner(args, root);
+}
+
+export const defaultAiderRunner: AiderRunner = async (args, cwd) => {
+  const privateHome = mkdtempSync(join(tmpdir(), "moss-aider-home-"));
+  const configHome = join(privateHome, "config");
+  const cacheHome = join(privateHome, "cache");
+  const dataHome = join(privateHome, "data");
+  const inherited = Object.keys(process.env);
+  const retained = new Set([
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+    "OLLAMA_API_BASE",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+  ]);
+  try {
+    mkdirSync(configHome);
+    mkdirSync(cacheHome);
+    mkdirSync(dataHome);
+    const result = await run("aider", args, {
+      cwd,
+      timeoutMs: AIDER_TIMEOUT_MS,
+      allowFailure: true,
+      env: {
+        PATH: process.env.PATH ?? "",
+        HOME: privateHome,
+        TMPDIR: privateHome,
+        XDG_CONFIG_HOME: configHome,
+        XDG_CACHE_HOME: cacheHome,
+        XDG_DATA_HOME: dataHome,
+        OLLAMA_API_BASE: OLLAMA_BASE_URL,
+        ...(process.env.LANG !== undefined ? { LANG: process.env.LANG } : {}),
+        ...(process.env.LC_ALL !== undefined ? { LC_ALL: process.env.LC_ALL } : {}),
+        ...(process.env.LC_CTYPE !== undefined ? { LC_CTYPE: process.env.LC_CTYPE } : {}),
+        ...(process.env.TERM !== undefined ? { TERM: process.env.TERM } : {}),
+      },
+      unsetEnv: inherited.filter((key) => !retained.has(key)),
+    });
+    const output = [result.stdout, result.stderr].filter((s) => s.trim().length > 0).join("\n");
+    return { exitCode: result.exitCode, output };
+  } finally {
+    rmSync(privateHome, { recursive: true, force: true });
+  }
 };
 
 // Aider's banner and token lines are noise next to the diff; the "Did not apply edit"

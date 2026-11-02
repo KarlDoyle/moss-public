@@ -29,6 +29,7 @@ import { loadRoutingPolicy, type RoutingPolicy, settingsFor } from "../lanes/pol
 import { meteredRefusal } from "../lanes/select.ts";
 import { requestPins } from "../lanes/skill-plan.ts";
 import { NetworkBoundaryError } from "../net.ts";
+import { utf8Bytes } from "../utf8.ts";
 import { classifyGenerateFailure } from "./failure.ts";
 import {
   getProvider as defaultGetProvider,
@@ -332,6 +333,8 @@ export interface RouteRequest extends ProviderGenerateOptions {
   // A registry-selected local default is not an explicit model pin. Hosted
   // fallback resolves its own configured model instead of receiving a local id.
   readonly modelIsDefault?: boolean;
+  // Optional total UTF-8 budget enforced immediately before each generation.
+  readonly maxRequestBytes?: number;
 }
 
 function laneOptions(
@@ -494,6 +497,17 @@ export async function routeAndGenerate(
       continue;
     }
     const effective = resolved.options.get(id) as ProviderGenerateOptions;
+    if (options.maxRequestBytes !== undefined) {
+      const requestBytes = utf8Bytes(effective.prompt) + utf8Bytes(effective.system ?? "");
+      if (!Number.isSafeInteger(options.maxRequestBytes) || options.maxRequestBytes <= 0) {
+        throw new Error("request byte limit must be a positive safe integer");
+      }
+      if (requestBytes > options.maxRequestBytes) {
+        throw new Error(
+          `request is ${requestBytes} bytes; the combined prompt and system context limit is ${options.maxRequestBytes} bytes. Shorten the prompt or remove context before retrying.`,
+        );
+      }
+    }
     // Recheck immediately before every attempt, including retries/fallback.
     if (id === "anthropic-api") {
       const refusal = apiRefusal(deps, (deps.policy ?? loadRoutingPolicy)(), effective);

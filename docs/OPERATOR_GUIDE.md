@@ -101,7 +101,7 @@ Type a prompt for a turn, or use a slash command: `/help`, `/model`, `/provider`
 
 ## Reviewed edits
 
-`/edit <request>` proposes a plan for tracked files in the selected repository. On a Claude lane it displays a unified diff, refuses parsed paths outside the plan, checks clean application, and asks `go? [y/N]` before applying. On the local lane, Aider dry-runs first, then approval starts a **second generation** which can differ. Read the resulting `git diff`; neither flow commits. Aider must be installed separately for local edits.
+`/edit <request>` proposes a plan for tracked files in the selected repository. On a Claude lane it displays a unified diff, refuses parsed paths outside the plan, checks clean application, and asks `go? [y/N]` before applying. The optional local Aider path dry-runs before approval, then starts a **second generation** which can differ. Aider is unsupported and not recommended: Moss confines the selected paths, but does not verify or sandbox Aider's complete process, Git, or network behavior. Neither flow commits.
 
 Recognised irreversible/external-facing gates make output stage-only. They depend on an optional workspace hook and suppress application, not model dispatch. Approval is for applying changes, not a confirmation before every hosted request. See [boundary limits](../LIMITATIONS.md#approval-and-execution-boundaries).
 

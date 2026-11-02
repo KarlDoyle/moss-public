@@ -1,9 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildAiderArgs,
   buildEditPlanPrompt,
+  canonicalAiderFiles,
   parseEditPlan,
   pickFiles,
+  runAiderConfined,
   tidyAiderOutput,
 } from "../../src/lib/aider.ts";
 
@@ -43,6 +48,63 @@ describe("buildAiderArgs", () => {
     const args = buildAiderArgs({ ...base, files: ["a.ts", "b.ts"], dryRun: true });
     expect(args.slice(0, 2)).toEqual(["--model", "ollama_chat/qwen2.5-coder:7b"]);
     expect(args.slice(-4)).toEqual(["--message", "do it", "a.ts", "b.ts"]);
+  });
+
+  it("rejects option-like filenames before constructing child argv", () => {
+    expect(() =>
+      buildAiderArgs({ ...base, files: ["--config=fixture.yml"], dryRun: true }),
+    ).toThrow(/looks like an option/);
+  });
+});
+
+describe("Aider path confinement", () => {
+  let root: string | undefined;
+  let outside: string | undefined;
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+    if (outside) rmSync(outside, { recursive: true, force: true });
+  });
+
+  it("passes a canonical in-repository regular file to a controlled adapter", async () => {
+    root = mkdtempSync(join(tmpdir(), "moss-aider-root-"));
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src", "file.ts"), "fixture\n");
+    const runner = vi.fn(async (_args: readonly string[], _cwd: string) => ({
+      exitCode: 0,
+      output: "controlled",
+    }));
+    await expect(
+      runAiderConfined(
+        root,
+        {
+          message: "synthetic edit",
+          model: "fixture-model",
+          files: ["src/file.ts"],
+          dryRun: true,
+        },
+        runner,
+      ),
+    ).resolves.toEqual({ exitCode: 0, output: "controlled" });
+    expect(runner.mock.calls[0]?.[0].slice(-1)).toEqual(["src/file.ts"]);
+    expect(runner.mock.calls[0]?.[1]).toBe(realpathSync(root));
+  });
+
+  it("resolves an in-root symlink to its canonical file path", () => {
+    root = mkdtempSync(join(tmpdir(), "moss-aider-root-"));
+    writeFileSync(join(root, "real.ts"), "fixture\n");
+    symlinkSync(join(root, "real.ts"), join(root, "alias.ts"));
+    expect(canonicalAiderFiles(root, ["alias.ts"])).toEqual(["real.ts"]);
+  });
+
+  it("refuses traversal and symlink escapes", () => {
+    const repo = mkdtempSync(join(tmpdir(), "moss-aider-root-"));
+    const outsideRoot = mkdtempSync(join(tmpdir(), "moss-aider-outside-"));
+    root = repo;
+    outside = outsideRoot;
+    writeFileSync(join(outsideRoot, "secret.ts"), "fixture\n");
+    symlinkSync(join(outsideRoot, "secret.ts"), join(repo, "link.ts"));
+    expect(() => canonicalAiderFiles(repo, ["../outside.ts"])).toThrow(/canonical relative path/);
+    expect(() => canonicalAiderFiles(repo, ["link.ts"])).toThrow(/outside the target repository/);
   });
 });
 

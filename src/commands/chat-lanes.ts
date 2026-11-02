@@ -12,6 +12,7 @@ import { ollamaUse } from "../lib/ollama-lifecycle.ts";
 import { resolveInsideRepo } from "../lib/paths.ts";
 import { claudeModel, LANE_TASK_TYPES, type LaneTaskType } from "../lib/providers/metadata.ts";
 import type { ProviderGenerateResult, ProviderId } from "../lib/providers/types.ts";
+import { utf8Bytes } from "../lib/utf8.ts";
 import type { EditRoute } from "../repl/edit.ts";
 import {
   type ChatGenerateParams,
@@ -102,6 +103,19 @@ export async function routedGenerate(
       assertChatModel(choice.model);
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+  const maxRequestBytes = params.maxRequestBytes;
+  const requestBytes = utf8Bytes(params.prompt) + utf8Bytes(params.system ?? "");
+  if (maxRequestBytes !== undefined) {
+    if (!Number.isSafeInteger(maxRequestBytes) || maxRequestBytes <= 0) {
+      return { ok: false, error: "request byte limit must be a positive safe integer." };
+    }
+    if (requestBytes > maxRequestBytes) {
+      return {
+        ok: false,
+        error: `request is ${requestBytes} bytes; the combined prompt and system context limit is ${maxRequestBytes} bytes. Shorten the prompt or remove context before retrying.`,
+      };
     }
   }
   try {

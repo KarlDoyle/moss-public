@@ -6,7 +6,7 @@ Moss is an experimental, local-first AI orchestration CLI. It routes tasks throu
 
 - Node.js 24 or later
 - pnpm 10 or later; use `packageManager` in `package.json` (currently pnpm 11.5.2) for reproducible installation
-- Git for diff reviews and edit workflows; optional Aider on PATH for local `/edit`
+- Git for diff reviews and hosted patch edits. Aider may be installed separately, but its optional local `/edit` adapter is unsupported and not recommended.
 - Ollama for local model execution
 - Optional: Claude Code CLI, installed and authenticated, for the `claude-code` lane
 - Optional: an Anthropic API key for metered API use; disabled by default on both routing paths (see [cap limits](../LIMITATIONS.md#spend-cap-and-accounting))
