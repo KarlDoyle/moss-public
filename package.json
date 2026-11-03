@@ -20,6 +20,7 @@
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "test": "vitest run --coverage",
+    "test:live:ollama": "MOSS_LIVE_OLLAMA=1 vitest run tests/live/ollama.live.test.ts",
     "test:watch": "vitest",
     "coverage": "vitest run --coverage",
     "cli": "tsx ./src/cli.ts",

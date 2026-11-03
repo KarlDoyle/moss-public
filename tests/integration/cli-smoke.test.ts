@@ -295,14 +295,16 @@ describe("CLI integration smoke (no real Ollama, no cloud)", () => {
     expect(parsed.task).toBe("code-review");
   });
 
-  it("`moss auth --json` lists cursor-manual as available (T05)", () => {
+  it("`moss auth --json` lists cursor-manual with manual billing metadata (T05)", () => {
     const result = runCli(["auth", "--json"], REPO_ROOT);
     expect(result.status).toBe(0);
     const parsed = JSON.parse(result.stdout ?? "{}");
     const row = parsed.providers.find((r: { id: string }) => r.id === "cursor-manual");
     expect(row).toBeDefined();
-    expect(row.status).toBe("available");
-    expect(row.executionReadiness).toBe("manual handoff");
+    // In an unpinned preview the manual lane is excluded from automatic
+    // fallback, so its displayed status depends on which other lanes are up.
+    // The next test pins it and verifies actual manual-handoff availability.
+    expect(row.metadata.billing).toBe("manual");
   });
 
   it("`moss ask --provider cursor-manual --explain --json` selects the handoff lane (T05)", () => {
