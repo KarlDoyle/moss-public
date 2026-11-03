@@ -86,20 +86,31 @@ const LOCAL: EditRoute = {
   summary: "local lane (Aider)",
 };
 
-export async function runEdit(ctx: EditContext, ask: string): Promise<void> {
+// Explicit outcome: warnings and deliberate no-apply decisions are successful.
+// Keep unexpected dependency failures usable in an interactive session too.
+export async function runEdit(ctx: EditContext, ask: string): Promise<boolean> {
+  try {
+    return await performEdit(ctx, ask);
+  } catch (error) {
+    ctx.err(`/edit: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
+}
+
+async function performEdit(ctx: EditContext, ask: string): Promise<boolean> {
   const edit = ctx.edit;
   if (edit === undefined) {
     ctx.err("/edit is not available in this session.");
-    return;
+    return false;
   }
   if (ask.length === 0) {
     ctx.err("usage: /edit <what to change>");
-    return;
+    return false;
   }
   const repo = await edit.resolveRepo();
   if (repo === null) {
     ctx.err("/edit: no git repo here and no Taisce checkout to fall back to.");
-    return;
+    return false;
   }
   const tracked = await edit.trackedFiles(repo);
   let route: EditRoute;
@@ -113,11 +124,11 @@ export async function runEdit(ctx: EditContext, ask: string): Promise<void> {
       throw new Error("edit route cannot honor the requested model pin.");
   } catch (error) {
     ctx.err(`/edit: ${error instanceof Error ? error.message : String(error)}`);
-    return;
+    return false;
   }
   if (route.lane === null) {
     ctx.err(`/edit: no lane can edit right now — ${route.summary}`);
-    return;
+    return false;
   }
   ctx.out(`· edit in ${repo} — ${route.summary}`);
 
@@ -131,7 +142,7 @@ export async function runEdit(ctx: EditContext, ask: string): Promise<void> {
   });
   if (!planned.ok || planned.response === undefined) {
     ctx.err(planned.error ?? "/edit: planning failed.");
-    return;
+    return false;
   }
   for (const warning of planned.warnings ?? []) ctx.err(warning);
   const { files: namedFiles, plan } = edit.parsePlan(planned.response);
@@ -141,14 +152,14 @@ export async function runEdit(ctx: EditContext, ask: string): Promise<void> {
   ctx.out(`  ${plan}`);
   if (files.length === 0) {
     ctx.err("/edit: the plan named no file tracked in this repo. Name the file in your ask.");
-    return;
+    return false;
   }
   try {
     edit.checkFiles(repo, files);
   } catch (error) {
     ctx.err(error instanceof Error ? error.message : String(error));
-    return;
+    return false;
   }
-  if (route.lane === "ollama") await localLane(ctx, edit, repo, plan, files, route);
-  else await claudeLane(ctx, edit, repo, plan, files, route);
+  if (route.lane === "ollama") return localLane(ctx, edit, repo, plan, files, route);
+  return claudeLane(ctx, edit, repo, plan, files, route);
 }

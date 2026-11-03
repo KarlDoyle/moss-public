@@ -224,6 +224,36 @@ describe("provider request byte budget", () => {
 });
 
 describe("router.routeAndGenerate", () => {
+  it("does not fall back after cancellation and preserves timeout/signal for the attempt", async () => {
+    const controller = new AbortController();
+    const stopped = new Error("fixture cancellation");
+    const primaryGenerate = vi.fn(async (options: { timeoutMs?: number; signal?: AbortSignal }) => {
+      expect(options.timeoutMs).toBe(1234);
+      expect(options.signal).toBe(controller.signal);
+      controller.abort(stopped);
+      throw new OllamaDaemonUnavailableError("fixture cancellation");
+    });
+    const fallbackGenerate = vi.fn(async () => ({
+      providerId: "anthropic-api" as const,
+      model: "m",
+      response: "must not dispatch",
+    }));
+    const ollama = fakeProvider({ id: "ollama", status: "available", generate: primaryGenerate });
+    const api = fakeProvider({
+      id: "anthropic-api",
+      status: "available",
+      generate: fallbackGenerate,
+    });
+    await expect(
+      routeAndGenerate(
+        "ask",
+        { task: "ask", prompt: "fixture", timeoutMs: 1234, signal: controller.signal },
+        depsWithProviders({ ollama, "anthropic-api": api }, () => ["ollama", "anthropic-api"]),
+      ),
+    ).rejects.toBe(stopped);
+    expect(fallbackGenerate).not.toHaveBeenCalled();
+  });
+
   it("dispatches to the selected provider and returns its result + explanation", async () => {
     const generate = vi.fn(async () => ({
       providerId: "ollama" as ProviderId,

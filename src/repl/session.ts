@@ -68,6 +68,8 @@ export interface ChatGenerateParams {
   readonly frontDoor?: string;
   // Internal dispatch boundary: includes the final assembled provider prompt.
   readonly maxRequestBytes?: number;
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
 }
 
 export interface ChatGenerateResult {
@@ -103,6 +105,9 @@ export interface ChatSessionDeps {
   readonly err: (line: string) => void;
   // One model turn. Default wraps `runAskCommand`; tests inject a stub.
   readonly generate: (params: ChatGenerateParams) => Promise<ChatGenerateResult>;
+  readonly signal?: AbortSignal;
+  readonly batchMode?: boolean;
+  readonly onBatchFailure?: () => void;
   // Called when the loop is ready for the next line (real CLI: rl.prompt()).
   readonly prompt?: () => void;
   // For `/status`.
@@ -190,6 +195,13 @@ async function dispatchWithinBudget(
   maxResponseBytes = session.maxBytes,
 ): Promise<ChatGenerateResult> {
   const { deps } = session;
+  if (deps.signal?.aborted) {
+    return {
+      ok: false,
+      error:
+        deps.signal.reason instanceof Error ? deps.signal.reason.message : "generation cancelled.",
+    };
+  }
   const bytes = utf8Bytes(params.prompt) + utf8Bytes(params.system ?? "");
   if (bytes > session.maxBytes) {
     return {
@@ -197,7 +209,11 @@ async function dispatchWithinBudget(
       error: `request is ${bytes} bytes; the combined prompt and system context limit is ${session.maxBytes} bytes. Shorten the prompt or remove loaded context before retrying.`,
     };
   }
-  const result = await deps.generate({ ...params, maxRequestBytes: session.maxBytes });
+  const result = await deps.generate({
+    ...params,
+    maxRequestBytes: session.maxBytes,
+    ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
+  });
   if (!result.ok || result.response === undefined) return result;
   const response = truncateUtf8(result.response, maxResponseBytes);
   if (response === result.response) return result;
@@ -276,6 +292,7 @@ interface Session {
   readonly deps: ChatSessionDeps;
   readonly maxBytes: number;
   readonly nextLine: () => Promise<string | undefined>;
+  failed: boolean;
 }
 
 function privacyText(deps: ChatSessionDeps): string | null {
@@ -350,11 +367,18 @@ async function runTurn(
     ...(frontDoor !== null ? { frontDoor } : {}),
     task,
   };
-  const result = await dispatchWithinBudget(
-    session,
-    params,
-    Math.max(0, session.maxBytes - utf8Bytes(typed)),
-  );
+  let result: ChatGenerateResult;
+  try {
+    result = await dispatchWithinBudget(
+      session,
+      params,
+      Math.max(0, session.maxBytes - utf8Bytes(typed)),
+    );
+  } catch (error) {
+    session.failed = true;
+    deps.err(error instanceof Error ? error.message : String(error));
+    return null;
+  }
   if (result.ok && result.response !== undefined) {
     for (const warning of result.warnings ?? []) deps.err(warning);
     if (result.route !== undefined) deps.out(`· ${result.route}`);
@@ -365,6 +389,7 @@ async function runTurn(
     return result;
   }
   deps.err(result.error ?? "generation failed.");
+  session.failed = true;
   return null;
 }
 
@@ -525,7 +550,7 @@ async function handleSlash(input: string, session: Session): Promise<SlashAction
 
     case "edit": {
       const privacy = privacyText(deps);
-      await runEdit(
+      const ok = await runEdit(
         {
           edit: deps.edit,
           out: deps.out,
@@ -538,6 +563,7 @@ async function handleSlash(input: string, session: Session): Promise<SlashAction
         },
         arg,
       );
+      if (!ok) session.failed = true;
       return "continue";
     }
 
@@ -634,10 +660,14 @@ export async function runChatSession(deps: ChatSessionDeps): Promise<void> {
     state,
     deps,
     maxBytes: deps.maxContextBytes ?? CHAT_CONTEXT_MAX_BYTES,
+    failed: false,
     nextLine: async () => {
       const next = await iterator.next();
       return next.done === true ? undefined : next.value;
     },
+  };
+  const finish = (): void => {
+    if (session.failed && deps.batchMode === true) deps.onBatchFailure?.();
   };
 
   deps.out(
@@ -658,7 +688,10 @@ export async function runChatSession(deps: ChatSessionDeps): Promise<void> {
 
   for (;;) {
     const raw = await session.nextLine();
-    if (raw === undefined) return;
+    if (raw === undefined) {
+      finish();
+      return;
+    }
     const line = raw.trim();
 
     if (line.length === 0) {
@@ -669,6 +702,7 @@ export async function runChatSession(deps: ChatSessionDeps): Promise<void> {
     if (line.startsWith("/")) {
       if ((await handleSlash(line, session)) === "exit") {
         deps.out("bye.");
+        finish();
         return;
       }
       deps.prompt?.();

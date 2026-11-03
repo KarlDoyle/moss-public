@@ -30,6 +30,24 @@ async function finish(
   );
 }
 
+async function finishAfterApply(
+  ctx: EditContext,
+  edit: SessionEditDeps,
+  repo: string,
+  second: boolean,
+): Promise<boolean> {
+  try {
+    await finish(ctx, edit, repo, second);
+    return true;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    ctx.err(
+      `/edit: changes were applied, but Moss could not read the diff summary (${detail}). Inspect git diff and git status before continuing.`,
+    );
+    return false;
+  }
+}
+
 export async function claudeLane(
   ctx: EditContext,
   edit: SessionEditDeps,
@@ -37,10 +55,10 @@ export async function claudeLane(
   plan: string,
   files: string[],
   route: EditRoute,
-) {
+): Promise<boolean> {
   if (edit.claudeDiff === undefined || edit.applyPatch === undefined) {
     ctx.err(`/edit: the ${route.lane} lane is not wired for edits in this session.`);
-    return;
+    return false;
   }
   ctx.out(
     `· ${route.lane} preparing a unified diff with ${route.model} (patch text stays in memory)…`,
@@ -51,7 +69,7 @@ export async function claudeLane(
     ctx.err(
       `/edit: no diff from ${route.lane}: ${made.error ?? "empty reply"}. Nothing was applied.`,
     );
-    return;
+    return false;
   }
   ctx.out(made.diff.trimEnd());
   try {
@@ -60,32 +78,43 @@ export async function claudeLane(
       ctx.err(
         `/edit: the diff touches files outside the plan (${stray.join(", ")}); refused, nothing applied.`,
       );
-      return;
+      return false;
     }
   } catch (error) {
     ctx.err(`/edit: ${error instanceof Error ? error.message : String(error)} Nothing applied.`);
-    return;
+    return false;
   }
   const check = await edit.applyPatch(repo, made.diff, true, files);
   if (!check.ok) {
     ctx.err(
       `/edit: the diff does not apply cleanly (git apply --check: ${check.output.trim()}); nothing applied.`,
     );
-    return;
+    return false;
   }
   if (route.stageOnly) {
     ctx.out(
       "STAGE-ONLY (front-door gate): the diff above is shown for review. No target patch was applied.",
     );
-    return;
+    return true;
   }
-  if (!(await askGo(ctx))) return;
-  const applied = await edit.applyPatch(repo, made.diff, false, files);
+  if (!(await askGo(ctx))) return true;
+  let applied: { ok: boolean; output: string };
+  try {
+    applied = await edit.applyPatch(repo, made.diff, false, files);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    ctx.err(
+      `/edit: git apply raised an error (${detail}); inspect git diff and git status because Moss cannot confirm whether changes were partial.`,
+    );
+    return false;
+  }
   if (!applied.ok) {
-    ctx.err(`/edit: git apply failed: ${applied.output.trim()}`);
-    return;
+    ctx.err(
+      `/edit: git apply failed: ${applied.output.trim()}. Inspect git diff and git status because Moss cannot confirm whether changes were partial.`,
+    );
+    return false;
   }
-  await finish(ctx, edit, repo, false);
+  return finishAfterApply(ctx, edit, repo, false);
 }
 
 export async function localLane(
@@ -95,7 +124,7 @@ export async function localLane(
   plan: string,
   files: string[],
   route: EditRoute,
-) {
+): Promise<boolean> {
   const editor = route.editorModel ?? edit.coderModel();
   const architect = route.model ?? undefined;
   const opts = {
@@ -109,17 +138,32 @@ export async function localLane(
   ctx.out(dry.output.length > 0 ? dry.output : "(aider printed nothing)");
   if (dry.exitCode !== 0) {
     ctx.err(`/edit: aider exited ${dry.exitCode} on the dry run; nothing was applied.`);
-    return;
+    return false;
   }
   if (route.stageOnly) {
     ctx.out(
       "STAGE-ONLY (front-door gate): the dry run above is staged for you to read. Nothing was applied.",
     );
-    return;
+    return true;
   }
-  if (!(await askGo(ctx))) return;
+  if (!(await askGo(ctx))) return true;
   ctx.out(`· aider applying with ${who} (no commit)…`);
-  const applied = await edit.aider(repo, { ...opts, dryRun: false });
+  let applied: { exitCode: number; output: string };
+  try {
+    applied = await edit.aider(repo, { ...opts, dryRun: false });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    ctx.err(
+      `/edit: aider apply failed (${detail}). Moss cannot determine whether it changed some files; inspect git diff and git status before continuing. No completion is reported.`,
+    );
+    return false;
+  }
   ctx.out(applied.output.length > 0 ? applied.output : "(aider printed nothing)");
-  await finish(ctx, edit, repo, true);
+  if (applied.exitCode !== 0) {
+    ctx.err(
+      `/edit: aider exited ${applied.exitCode} during apply. Moss cannot determine whether it changed some files; inspect git diff and git status before continuing. No completion is reported.`,
+    );
+    return false;
+  }
+  return finishAfterApply(ctx, edit, repo, true);
 }

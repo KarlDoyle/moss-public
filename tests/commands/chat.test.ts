@@ -68,6 +68,55 @@ describe("synthesisePrompt", () => {
 });
 
 describe("runChatSession", () => {
+  it("marks a failed piped generation as a batch failure", async () => {
+    const onBatchFailure = vi.fn();
+    const h = harness(
+      ["synthetic failure", "/exit"],
+      async () => ({
+        ok: false,
+        error: "fixture generation failed",
+      }),
+      { batchMode: true, onBatchFailure },
+    );
+    await runChatSession(h.deps);
+    expect(h.err).toContain("fixture generation failed");
+    expect(onBatchFailure).toHaveBeenCalledOnce();
+  });
+
+  it("marks a rejected piped generation as a batch failure and keeps the session diagnosis", async () => {
+    const onBatchFailure = vi.fn();
+    const h = harness(
+      ["synthetic failure", "/exit"],
+      async () => Promise.reject(new Error("fixture provider rejection")),
+      { batchMode: true, onBatchFailure },
+    );
+    await runChatSession(h.deps);
+    expect(h.err).toContain("fixture provider rejection");
+    expect(onBatchFailure).toHaveBeenCalledOnce();
+  });
+
+  it("keeps an interactive session alive after a failed generation", async () => {
+    const onBatchFailure = vi.fn();
+    const h = harness(
+      ["synthetic failure", "/help", "/exit"],
+      async () => ({
+        ok: false,
+        error: "fixture generation failed",
+      }),
+      { batchMode: false, onBatchFailure },
+    );
+    await runChatSession(h.deps);
+    expect(h.out.join("\n")).toContain("/help");
+    expect(onBatchFailure).not.toHaveBeenCalled();
+  });
+
+  it("passes the session abort signal to generation", async () => {
+    const controller = new AbortController();
+    const h = harness(["fixture", "/exit"], echo, { signal: controller.signal });
+    await runChatSession(h.deps);
+    expect(h.generate.mock.calls[0]?.[0].signal).toBe(controller.signal);
+  });
+
   it("prints a banner and the help list, then exits on /exit", async () => {
     const h = harness(["/help", "/exit"], echo);
     await runChatSession(h.deps);

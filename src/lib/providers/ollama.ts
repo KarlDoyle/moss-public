@@ -20,6 +20,7 @@ export interface OllamaProviderDependencies {
       headers?: Record<string, string>;
       body?: string;
       timeoutMs?: number;
+      signal?: AbortSignal;
     },
   ) => Promise<FetchResult>;
 }
@@ -31,6 +32,7 @@ export const defaultOllamaProviderDependencies: OllamaProviderDependencies = {
       ...(options?.headers !== undefined ? { headers: options.headers } : {}),
       ...(options?.body !== undefined ? { body: options.body } : {}),
       timeoutMs: options?.timeoutMs ?? 60_000,
+      ...(options?.signal !== undefined ? { signal: options.signal } : {}),
     }),
 };
 
@@ -76,6 +78,7 @@ export interface OllamaGenerateOptions {
   readonly system?: string;
   readonly temperature?: number;
   readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
   // Context window in tokens. Defaults to resolveNumCtx(); see generate() for why it is
   // never left to the daemon.
   readonly numCtx?: number;
@@ -155,6 +158,7 @@ export async function generate(
       headers: { "content-type": "application/json" },
       body: JSON.stringify(requestBody),
       timeoutMs: options.timeoutMs ?? DEFAULT_GENERATE_TIMEOUT_MS,
+      ...(options.signal !== undefined ? { signal: options.signal } : {}),
     });
   } catch (error) {
     if (error instanceof NetworkBoundaryError) {
@@ -278,6 +282,7 @@ export async function ollamaGenerate(
     ...(options.system !== undefined ? { system: options.system } : {}),
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+    ...(options.signal !== undefined ? { signal: options.signal } : {}),
     ...(options.numCtx !== undefined ? { numCtx: options.numCtx } : {}),
     ...(options.maxTokens !== undefined ? { numPredict: options.maxTokens } : {}),
   };

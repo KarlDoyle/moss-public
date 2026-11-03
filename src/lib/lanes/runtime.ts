@@ -59,6 +59,8 @@ export interface DispatchInput {
   readonly prompt: string;
   readonly system?: string;
   readonly command: string;
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
 }
 
 export interface DispatchDeps {
@@ -108,6 +110,8 @@ export async function dispatchChoice(
     ...(input.system !== undefined ? { system: input.system } : {}),
     ...(s.num_ctx !== undefined ? { numCtx: s.num_ctx } : {}),
     ...(cap !== undefined ? { maxTokens: cap } : {}),
+    ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+    ...(input.signal !== undefined ? { signal: input.signal } : {}),
   });
   if (choice.lane === "ollama") ollamaUse.used = true;
   const billing = getProviderMetadata(choice.lane).billing;

@@ -39,12 +39,22 @@ export interface ClaudeJson {
 // `claude -p --output-format json` prints one result object. Cache reads and writes count as
 // input: they are tokens the model read.
 export function parseClaudeJson(stdout: string): ClaudeJson | null {
-  let d: Record<string, unknown>;
+  let value: unknown;
   try {
-    d = JSON.parse(stdout.trim()) as Record<string, unknown>;
+    value = JSON.parse(stdout.trim()) as unknown;
   } catch {
     return null;
   }
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    typeof (value as Record<string, unknown>).is_error !== "boolean" ||
+    typeof (value as Record<string, unknown>).result !== "string"
+  ) {
+    return null;
+  }
+  const d = value as Record<string, unknown>;
   const usage = (d.usage ?? {}) as Record<string, unknown>;
   const num = (v: unknown) => (typeof v === "number" ? v : 0);
   const input =

@@ -184,11 +184,16 @@ describe("ollama.generate", () => {
 // that on 2026-09-18. These pin that the window is always sent, never left to the daemon.
 describe("ollama.generate never leaves the context window to the daemon", () => {
   function capture() {
-    const seen: { body?: string | undefined; timeoutMs?: number | undefined } = {};
+    const seen: {
+      body?: string | undefined;
+      timeoutMs?: number | undefined;
+      signal: AbortSignal | undefined;
+    } = { signal: undefined };
     const deps: OllamaProviderDependencies = {
       netFetch: async (_url, options) => {
         seen.body = options?.body;
         seen.timeoutMs = options?.timeoutMs;
+        seen.signal = options?.signal;
         return {
           status: 200,
           ok: true,
@@ -221,6 +226,14 @@ describe("ollama.generate never leaves the context window to the daemon", () => 
     await generate({ model: "m", prompt: "p" }, deps);
     expect(seen.timeoutMs).toBe(DEFAULT_GENERATE_TIMEOUT_MS);
     expect(DEFAULT_GENERATE_TIMEOUT_MS).toBe(300_000);
+  });
+
+  it("forwards a caller timeout and cancellation signal", async () => {
+    const { seen, deps } = capture();
+    const controller = new AbortController();
+    await generate({ model: "m", prompt: "p", timeoutMs: 1234, signal: controller.signal }, deps);
+    expect(seen.timeoutMs).toBe(1234);
+    expect(seen.signal).toBe(controller.signal);
   });
 
   it("honours MOSS_OLLAMA_NUM_CTX, and ignores nonsense or tiny values", () => {

@@ -39,6 +39,7 @@ export interface LiteLlmProviderDependencies {
       headers?: Record<string, string>;
       body?: string;
       timeoutMs?: number;
+      signal?: AbortSignal;
     },
   ) => Promise<FetchResult>;
   readonly loadConfig: () => Promise<LiteLlmConfig | null>;
@@ -52,6 +53,7 @@ export const defaultLiteLlmProviderDependencies: LiteLlmProviderDependencies = {
       ...(options?.headers !== undefined ? { headers: options.headers } : {}),
       ...(options?.body !== undefined ? { body: options.body } : {}),
       timeoutMs: options?.timeoutMs ?? 30_000,
+      ...(options?.signal !== undefined ? { signal: options.signal } : {}),
     }),
   loadConfig: () => loadLiteLlmConfig(defaultLiteLlmConfigLoaderDeps),
   now: () => new Date(),
@@ -191,7 +193,8 @@ export async function liteLlmGenerate(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(requestBody),
-      timeoutMs: 120_000,
+      timeoutMs: options.timeoutMs ?? 120_000,
+      ...(options.signal !== undefined ? { signal: options.signal } : {}),
     });
   } catch (error) {
     if (error instanceof NetworkBoundaryError) throw error;
