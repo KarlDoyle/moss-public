@@ -21,6 +21,7 @@
     "lint:fix": "biome check --write .",
     "test": "vitest run --coverage",
     "test:live:ollama": "MOSS_LIVE_OLLAMA=1 vitest run tests/live/ollama.live.test.ts",
+    "test:live:workflows": "MOSS_LIVE_WORKFLOWS=1 vitest run tests/live/local-workflows.live.test.ts",
     "test:watch": "vitest",
     "coverage": "vitest run --coverage",
     "cli": "tsx ./src/cli.ts",
