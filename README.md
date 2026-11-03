@@ -89,6 +89,8 @@ Start with chat, pinned `ask`, route inspection and built-in diff reviews. `run`
 
 **Experimental; not release-ready.** Use Moss to inspect routes, run bounded prompts/diff reviews and review planned text patches before approval. Aider support is deprecated and disabled; local `/edit` requests are refused before planning or application. Moss is not an autonomous agent, retrieval system or finished platform. Earlier document, memory and integration commands remain parked outside the current focus.
 
+For an opt-in check against an already-installed local model, see [Ollama-only live validation](docs/OLLAMA_LIVE_VALIDATION.md). It does not contact hosted providers.
+
 ## Testing
 
 Run the existing gates from the checkout (no model generation required):
