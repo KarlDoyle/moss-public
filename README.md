@@ -91,6 +91,8 @@ Start with chat, pinned `ask`, route inspection and built-in diff reviews. `run`
 
 For an opt-in check against an already-installed local model, see [Ollama-only live validation](docs/OLLAMA_LIVE_VALIDATION.md). It does not contact hosted providers.
 
+For opt-in checks of local chat and the bundled read-only reviews, see [local workflow validation](docs/LOCAL_WORKFLOW_VALIDATION.md).
+
 ## Testing
 
 Run the existing gates from the checkout (no model generation required):
