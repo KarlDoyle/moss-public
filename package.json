@@ -27,17 +27,17 @@
     "prepare": "git config core.hooksPath .githooks || true"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.14",
-    "@types/node": "^24.13.5",
+    "@biomejs/biome": "2.6.4",
+    "@types/node": "^24.19.2",
     "@vitest/coverage-v8": "^5.0.5",
-    "tsx": "^4.23.13",
+    "tsx": "^4.23.15",
     "typescript": "7.0.2",
     "vite": "^8.3.5",
     "vitest": "^5.0.5"
   },
   "dependencies": {
     "commander": "^15.0.0",
-    "execa": "^10.0.1",
+    "execa": "^10.2.1",
     "yaml": "^2.9.1",
     "zod": "^4.6.6"
   },
