@@ -1,16 +1,9 @@
-// `/edit <ask>` — lane-aware. The plan is made on the routed `edit` lane, then:
-//
-//   local lane (ollama)  → Aider --architect (chat model) + --editor-model (coder), dry run,
-//                          diff shown, "go?", real run. The apply is a second generation.
-//   Claude lane          → the lane writes a unified diff for exactly the planned files; moss
-//                          shows it, `git apply --check`s it, "go?", then applies THAT diff —
-//                          what was approved is what lands.
-//   stage-only (a gate)  → the plan and diff are shown and nothing is applied, no "go?".
-//
-// Never commits. Every side effect is an injected dependency (wired in src/commands/chat.ts).
+// Hosted /edit: plan, validate text diff, request approval, then apply. Never commits.
+// The former local Aider path is deprecated and refused before planning.
+import { AIDER_DEPRECATION } from "../lib/aider.ts";
 import { requestPins } from "../lib/lanes/skill-plan.ts";
 import type { ProviderId } from "../lib/providers/types.ts";
-import { claudeLane, localLane } from "./edit-lanes.ts";
+import { claudeLane } from "./edit-lanes.ts";
 import type { ChatGenerateParams, ChatGenerateResult } from "./session.ts";
 
 export { diffPaths } from "./edit-lanes.ts";
@@ -31,7 +24,9 @@ export interface SessionEditDeps {
   readonly trackedFiles: (repo: string) => Promise<string[]>;
   // Throws (with the guard message) when a picked file is sensitivity-gated.
   readonly checkFiles: (repo: string, files: readonly string[]) => void;
+  /** @deprecated Compatibility only; local editing is disabled. */
   readonly coderModel: () => string;
+  /** @deprecated Never invoked; local editing is disabled. */
   readonly aider: (
     repo: string,
     options: {
@@ -107,6 +102,11 @@ async function performEdit(ctx: EditContext, ask: string): Promise<boolean> {
     ctx.err("usage: /edit <what to change>");
     return false;
   }
+  const pins = requestPins(ctx.model, ctx.provider);
+  if (pins.pinLane === "ollama") {
+    ctx.err(`/edit: ${AIDER_DEPRECATION}`);
+    return false;
+  }
   const repo = await edit.resolveRepo();
   if (repo === null) {
     ctx.err("/edit: no git repo here and no Taisce checkout to fall back to.");
@@ -115,7 +115,6 @@ async function performEdit(ctx: EditContext, ask: string): Promise<boolean> {
   const tracked = await edit.trackedFiles(repo);
   let route: EditRoute;
   try {
-    const pins = requestPins(ctx.model, ctx.provider);
     route = edit.route !== undefined ? await edit.route(ask, ctx.model, ctx.provider) : LOCAL;
     if (route.lane !== null && pins.pinLane !== undefined && route.lane !== pins.pinLane) {
       throw new Error("edit route cannot honor the requested provider/model pin.");
@@ -128,6 +127,10 @@ async function performEdit(ctx: EditContext, ask: string): Promise<boolean> {
   }
   if (route.lane === null) {
     ctx.err(`/edit: no lane can edit right now — ${route.summary}`);
+    return false;
+  }
+  if (route.lane === "ollama") {
+    ctx.err(`/edit: ${AIDER_DEPRECATION}`);
     return false;
   }
   ctx.out(`· edit in ${repo} — ${route.summary}`);
@@ -160,6 +163,5 @@ async function performEdit(ctx: EditContext, ask: string): Promise<boolean> {
     ctx.err(error instanceof Error ? error.message : String(error));
     return false;
   }
-  if (route.lane === "ollama") return localLane(ctx, edit, repo, plan, files, route);
   return claudeLane(ctx, edit, repo, plan, files, route);
 }

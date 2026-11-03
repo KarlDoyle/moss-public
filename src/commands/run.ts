@@ -282,7 +282,10 @@ export function registerRun(program: Command): void {
     )
     .option("--room <id>", "Use this room id explicitly")
     .option("--model <name>", "Override the registry-selected model")
-    .option("--write-report", "Also write a markdown report under ~/.local/share/moss/reports/")
+    .option(
+      "--write-report",
+      "Also write a markdown report under the detected Moss project root reports/",
+    )
     .option(
       "--context <relPath>",
       "Taisce-skill path only: a Taisce-relative file read through the guard-reads deny list and included as context",

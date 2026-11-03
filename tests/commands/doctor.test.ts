@@ -49,7 +49,7 @@ function fakeDeps(overrides: Partial<DoctorDependencies> = {}): DoctorDependenci
       }),
     ),
     cwd: () => "/Users/test/Dev/moss",
-    nodeVersion: () => "v22.18.0",
+    nodeVersion: () => "v24.16.0",
     projectRoot: () => "/Users/test/Dev/moss",
     ...overrides,
   };
@@ -72,12 +72,11 @@ describe("doctor.gatherDiagnostics", () => {
     expect(report.warnings).toEqual([]);
   });
 
-  it("reports Node below 22 as not satisfying min and adds a warning", async () => {
-    const deps = fakeDeps({ nodeVersion: () => "v20.10.0" });
-    const report = await gatherDiagnostics(deps);
-    expect(report.node.satisfiesMin).toBe(false);
-    expect(report.warnings.some((w) => w.includes("Node 20"))).toBe(true);
-    expect(report.ok).toBe(false);
+  it.each([20, 22, 23, 24, 25])("requires the package Node minimum for major %s", async (major) => {
+    const report = await gatherDiagnostics(fakeDeps({ nodeVersion: () => `v${major}.0.0` }));
+    expect(report.node.satisfiesMin).toBe(major >= 24);
+    expect(report.warnings.some((w) => w.includes("below the required 24"))).toBe(major < 24);
+    expect(report.ok).toBe(major >= 24);
   });
 
   it("flags unreachable Ollama daemon", async () => {

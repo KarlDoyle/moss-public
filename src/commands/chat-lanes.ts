@@ -8,7 +8,6 @@ import { defaultSelectDeps, dispatchChoice } from "../lib/lanes/runtime.ts";
 import { type LaneChoice, type SelectDeps, selectLane } from "../lib/lanes/select.ts";
 import { requestPins } from "../lib/lanes/skill-plan.ts";
 import { assertChatModel } from "../lib/ollama.ts";
-import { ollamaUse } from "../lib/ollama-lifecycle.ts";
 import { resolveInsideRepo } from "../lib/paths.ts";
 import { claudeModel, LANE_TASK_TYPES, type LaneTaskType } from "../lib/providers/metadata.ts";
 import type { ProviderGenerateResult, ProviderId } from "../lib/providers/types.ts";
@@ -172,7 +171,6 @@ export async function editRoute(
   )
     throw new Error(`provider '${choice.lane}' does not support /edit.`);
   const lane = choice.lane;
-  if (lane === "ollama") ollamaUse.used = true; // Aider will use it
   const why = choice.verdicts
     .map((v) => `${v.picked ? "✓" : "·"} ${v.lane}: ${v.reason}`)
     .join("; ");

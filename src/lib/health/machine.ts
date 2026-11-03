@@ -95,14 +95,14 @@ export const nodeVersion: Check = {
   name: "Node",
   run: async () => {
     const major = Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10);
-    return major >= 22
+    return major >= 24
       ? { group: G, name: "Node", status: "PASS", detail: `v${process.versions.node}` }
       : {
           group: G,
           name: "Node",
           status: "FAIL",
-          detail: `v${process.versions.node} — moss needs ≥22`,
-          fix: "nvm install 22",
+          detail: `v${process.versions.node} — moss needs ≥24`,
+          fix: "nvm install 24",
         };
   },
 };

@@ -46,8 +46,6 @@ export class ExecFailedError extends Error {
 //   - bash: src/lib/taisce/hooks.ts — runs Taisce's own session-start.sh and
 //     front-door.sh hooks by path, so the session reuses the files instead of
 //     copying them. Never given a `-c` string.
-//   - aider: src/lib/aider.ts — the `/edit` engine. Always dry-run first; the
-//     real run needs the operator's "go?" in the session.
 //   - claude: src/lib/providers/claude-code.ts — the subscription lane, `claude -p` with
 //     every tool, hook, setting source, MCP server and slash command switched off.
 //   - brew, softwareupdate, launchctl, npm: src/lib/health/ (`moss check`) — each admitted
@@ -65,7 +63,6 @@ const ALLOWED_COMMANDS: ReadonlySet<string> = new Set([
   "gh",
   "ollama",
   "bash",
-  "aider",
   "claude",
   "security",
   "brew",

@@ -16,7 +16,7 @@ Maintained by [Karl Doyle](https://github.com/KarlDoyle). Source: [github.com/Ka
 - **Keeps local work local.** Uses Ollama for tasks configured to run on a local model.
 - **Supports hosted models when needed.** Can use Claude through the Claude Code CLI or the Anthropic API.
 - **Makes cost visible.** Shows route rationale and usage estimates. Both routers check the Anthropic API enable switch and an advisory daily budget (default €2; API lane disabled by default). Unknown usage/cost and accounting failures are surfaced.
-- **Keeps the human in control.** Offers route inspection and requires approval before a hosted `/edit` patch is applied. The optional local Aider adapter is unsupported and not recommended; its child-process behavior has not been verified.
+- **Keeps the human in control.** Offers route inspection and requires approval before a hosted `/edit` patch is applied. Aider support is deprecated and disabled; local `/edit` requests are refused before planning or application.
 - **Constrains execution.** Centralised checks restrict supported paths, subprocesses and direct HTTP destinations; they are application controls, not an independently audited sandbox.
 
 ## Provider model
@@ -27,7 +27,7 @@ Maintained by [Karl Doyle](https://github.com/KarlDoyle). Source: [github.com/Ka
 | `claude-code` | Claude via `claude -p` | Hosted reasoning and editing when the CLI is available | Cost depends on the account and plan used by the CLI |
 | `anthropic-api` | Anthropic API | Metered hosted calls | Recorded EUR estimate; advisory budget on routed calls |
 
-The default session and external-workspace skills use `config/routing.yaml`: route/brief/embed/vision are configured local, while reason/edit prefer Claude Code, then the enabled Anthropic API lane, then local Ollama. These are routing categories, not evidence that every modality is exposed in the session. Unavailable lanes are skipped; a generation failure on these routes is reported, without a second dispatch. Local-first does **not** mean every request is local.
+The default session and external-workspace skills use `config/routing.yaml`: route/brief/embed/vision are configured local, while reason/edit prefer Claude Code, then the enabled Anthropic API lane, then local Ollama. Local reasoning remains available, but `/edit` refuses the deprecated local Aider route; it does not change a local pin into a hosted request. These are routing categories, not evidence that every modality is exposed in the session. Unavailable lanes are skipped; a generation failure on these routes is reported, without a second dispatch. Local-first does **not** mean every request is local.
 
 Standalone `ask` retains provider-order fallback. Both ask preview forms now resolve the same request, provider/model pins and fallback list. Explicit provider pins never fall back; a model-only pin selects its native lane. A registry default alone can still admit hosted fallback, which uses a configured hosted model. Use an explicit local provider and model for local-only work. Provider interoperability remains experimental.
 
@@ -36,9 +36,9 @@ Standalone `ask` retains provider-order fallback. Both ask preview forms now res
 Moss uses fixed workflows rather than open-ended model autonomy:
 
 - **Route inspection:** `--explain` skips the requested generation, but availability probes can contact providers. Global `--explain ask` and `ask --explain` share request parsing and resolution. Pin Ollama and a model to avoid hosted availability probes.
-- **Approval:** Claude-lane `/edit` checks planned paths and `git apply --check`, shows a diff, then asks `go? [y/N]` before applying it. The optional local Aider path runs a dry pass before approval, but the later child-process edit is unsupported and unverified. Neither flow commits.
+- **Approval:** Claude-lane `/edit` checks planned paths and `git apply --check`, shows a diff, then asks `go? [y/N]` before applying it. Local Aider editing is deprecated and disabled. Hosted patch editing never commits.
 - **Stage-only:** recognised irreversible/external-facing gates suppress application, not provider dispatch. Gate detection depends on an optional external workspace hook; it is not a universal intent classifier.
-- **Context and execution:** chat enforces a combined UTF-8 request budget over prompt and system context; the byte limit is shown by `/status`, and oversized requests are refused. Subprocess allowlists do not contain every action of an allowed child; Claude Code and Aider do their own networking. Optional workspace integrations and telemetry can access paths outside this checkout.
+- **Context and execution:** chat enforces a combined UTF-8 request budget over prompt and system context; the byte limit is shown by `/status`, and oversized requests are refused. Subprocess allowlists do not contain every action of an allowed child; Claude Code performs its own networking. Optional workspace integrations and telemetry can access paths outside this checkout.
 - **Credentials and logs:** the API key comes from `ANTHROPIC_API_KEY` or macOS Keychain. Usage logs contain metadata, not prompt/response bodies; reports and terminal output can contain source material. Review these before sharing.
 
 The daily API budget applies to routed asks, session turns, hosted edit planning/diff calls and external-workspace skills. Both routers compare recorded usage plus an estimated input/output allowance before API dispatch. Unknown pricing or an incomplete recorded balance refuses the API lane. This is not a provider billing limit: concurrent requests, failed/unrecorded calls, Claude Code generation/probes, LiteLLM upstream billing and other applications remain outside that estimate. EUR uses static list prices and configured dated FX, not actual invoices. See [limitations](LIMITATIONS.md).
@@ -87,7 +87,7 @@ Start with chat, pinned `ask`, route inspection and built-in diff reviews. `run`
 
 ## Fit and status
 
-**Experimental; not release-ready.** Use Moss to inspect routes, run bounded prompts/diff reviews and review planned text patches before approval. The optional local Aider adapter is unsupported and not recommended; its child-process behavior has not been verified. Moss is not an autonomous agent, retrieval system or finished platform. Earlier document, memory and integration commands remain parked outside the current focus.
+**Experimental; not release-ready.** Use Moss to inspect routes, run bounded prompts/diff reviews and review planned text patches before approval. Aider support is deprecated and disabled; local `/edit` requests are refused before planning or application. Moss is not an autonomous agent, retrieval system or finished platform. Earlier document, memory and integration commands remain parked outside the current focus.
 
 ## Testing
 
@@ -107,11 +107,12 @@ Coverage thresholds are 79% statements, 69% branches, 76% functions and 80% line
 - [First run](docs/FIRST_RUN.md) — setup and first-use steps.
 - [Operator guide](docs/OPERATOR_GUIDE.md) — everyday commands and workflows.
 - [Limitations](LIMITATIONS.md) and [Future](FUTURE.md) — known limitations and planned work.
+- [Readiness review](docs/READINESS_REVIEW.md) — remediation evidence, Aider deprecation and the experimental release decision.
 
 ## Engineering decisions
 
 - **Explicit task-based routing:** a YAML policy chooses lane/model for session workflows, rather than asking a model to choose. Trade-off: predictable selection needs maintained configuration, and the older standalone router still differs.
-- **Hosted patch proposals with human approval:** diffs are checked before application, which is a separate step. Trade-off: manual review takes time. The optional local Aider adapter remains unsupported and not recommended.
+- **Hosted patch proposals with human approval:** diffs are checked before application, which is a separate step. Trade-off: manual review takes time. Local Aider editing is deprecated and disabled.
 - **Bounded context and explicit hosted lanes:** selected files and capped session history limit prompt growth; hosted providers are named lanes. Trade-off: omitted context can reduce usefulness, and choosing a hosted route sends supplied context off-machine. This is not retrieval or comprehensive workspace understanding.
 
 ## Engineering approach

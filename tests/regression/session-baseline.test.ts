@@ -122,15 +122,13 @@ describe("baseline: /standup and /capture", () => {
   });
 });
 
-describe("baseline: /edit dry-run stops at go?", () => {
-  it("runs Aider once as a dry run and applies nothing on 'n'", async () => {
-    const s = session(["/edit set x in a.py", "n", "/exit"]);
+describe("baseline: deprecated local editing", () => {
+  it("refuses local edits without invoking Aider or prompting for approval", async () => {
+    const s = session(["/edit set x in a.py", "/exit"]);
     await s.run;
-    expect(s.aider).toHaveBeenCalledTimes(1);
-    expect(s.aider.mock.calls[0]?.[1]).toMatchObject({ dryRun: true, files: ["a.py"] });
-    const text = s.out.join("\n");
-    expect(text).toContain("go? [y/N]");
-    expect(text).toContain("not applied. No target patch was applied.");
+    expect(s.aider).not.toHaveBeenCalled();
+    expect(s.err.join("\n")).toContain("deprecated and disabled");
+    expect(s.out.join("\n")).not.toContain("go? [y/N]");
   });
 });
 

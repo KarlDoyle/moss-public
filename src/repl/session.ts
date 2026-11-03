@@ -13,7 +13,7 @@ export type { EditRoute, SessionEditDeps } from "./edit.ts";
 //   prompt  → system: privacy rules + brief + front-door lines + loaded files
 //             prompt: transcript + what was typed                              → model
 //   /skill  → the same header + that skill's SKILL.md → model
-//   /edit   → model plans → Aider dry-run diff → "go?" → Aider applies → git diff --stat
+//   /edit   → hosted plan → checked text diff → "go?" → git apply → git diff --stat
 //
 // This module performs NO subprocess, network, or filesystem call of its own. Every one is
 // an injected dependency, which the real CLI (src/commands/chat.ts) wires to the guarded
@@ -171,7 +171,7 @@ const CORE_HELP: ReadonlyArray<readonly [string, string]> = [
 
 const TAISCE_HELP: ReadonlyArray<readonly [string, string]> = [
   ["/read <path>", "load one Taisce file (guard-reads applies) into the context"],
-  ["/edit <ask>", "plan on the edit lane → diff → 'go?' → apply (never commits)"],
+  ["/edit <ask>", "hosted plan → checked diff → 'go?' → apply; local Aider edits deprecated"],
   ["/check", "moss check: machine, AI tools, scheduler + backup, estate — report only"],
 ];
 

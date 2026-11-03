@@ -6,7 +6,7 @@ Moss is an experimental, local-first AI orchestration CLI. It routes tasks throu
 
 - Node.js 24 or later
 - pnpm 10 or later; use `packageManager` in `package.json` (currently pnpm 11.5.2) for reproducible installation
-- Git for diff reviews and hosted patch edits. Aider may be installed separately, but its optional local `/edit` adapter is unsupported and not recommended.
+- Git for diff reviews and hosted patch edits. Aider support is deprecated and disabled; do not install Aider for Moss.
 - Ollama for local model execution
 - Optional: Claude Code CLI, installed and authenticated, for the `claude-code` lane
 - Optional: an Anthropic API key for metered API use; disabled by default on both routing paths (see [cap limits](../LIMITATIONS.md#spend-cap-and-accounting))
@@ -30,7 +30,7 @@ The package currently exposes a source CLI; it is not a published, prebuilt glob
 pnpm exec tsx ./src/cli.ts doctor
 ```
 
-`doctor` checks binaries, local Ollama and optional workspace readiness; it does not generate a model answer. It may report GitHub account information: review output before sharing. Node requirements in `package.json` take precedence over doctor's older minimum check. Missing optional integrations need not prevent a pinned local request.
+`doctor` checks binaries, local Ollama and optional workspace readiness; it does not generate a model answer. It may report GitHub account information: review output before sharing. The package, doctor and machine checks require Node 24 or newer. Missing optional integrations need not prevent a pinned local request.
 
 `status`, `auth`, `ask --explain` and reasoning/edit route previews can invoke a real Claude Code readiness call (cached for 15 minutes). `check` is a specialist machine/workspace check and can contact package registries; it is not a portable, offline setup prerequisite.
 

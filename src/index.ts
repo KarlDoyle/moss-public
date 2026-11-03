@@ -2,13 +2,13 @@
  * moss — public library surface.
  *
  * Lets other tools use moss's deterministic provider routing directly, as a
- * library, instead of shelling out to the CLI. The CLI (`src/cli.ts`) is a thin
- * wrapper over this same core. Re-exports only; no behaviour lives here, so the
+ * library, instead of shelling out to the CLI. Standalone asks use this provider-order core; default sessions use
+ * task-policy routing. These engines share pin and API eligibility controls. Re-exports only; no behaviour lives here, so the
  * safety boundaries (subprocess / network / git / reports) are unchanged.
  *
  * Example:
- *   import { routeAndGenerate, loadRegistry } from "moss";
- *   const { result, explanation } = await routeAndGenerate("ask", { prompt });
+ *   import { routeAndGenerate } from "moss";
+ *   const { result, explanation } = await routeAndGenerate("ask", { task: "ask", prompt, provider: "ollama", model: "llama3.1:latest" });
  */
 
 // Routing — the core capability.

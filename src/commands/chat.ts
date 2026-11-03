@@ -1,15 +1,8 @@
 import { existsSync, realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
 import type { Command } from "commander";
-import {
-  buildEditPlanPrompt,
-  defaultAiderRunner,
-  parseEditPlan,
-  pickFiles,
-  runAiderConfined,
-  tidyAiderOutput,
-} from "../lib/aider.ts";
-import { assertSafeGitConfig, gitDiffStat, gitTopLevel, gitTrackedFiles } from "../lib/git.ts";
+import { buildEditPlanPrompt, defaultAiderRunner, parseEditPlan, pickFiles } from "../lib/aider.ts";
+import { gitDiffStat, gitTopLevel, gitTrackedFiles } from "../lib/git.ts";
 import { defaultHealthCtx } from "../lib/health/context.ts";
 import { renderReport, runChecks } from "../lib/health/runner.ts";
 import { renderLaneChoice } from "../lib/lanes/explain.ts";
@@ -153,7 +146,7 @@ export function buildTaisceSessionDeps(
   const liveSkills = (): SessionSkill[] => (present ? listLiveTaisceSkills(root) : []);
   return {
     banner:
-      "moss — Taisce session, local model. Ollama runs it and moss asks it. Optional Aider edits are unsupported. /help lists everything, /exit leaves.",
+      "moss — Taisce session, local model. Ollama runs it and moss asks it. Aider support is deprecated; local /edit is disabled. /help lists everything, /exit leaves.",
     brief: () => (present ? runSessionStartHook(root) : Promise.resolve(null)),
     frontDoor: (prompt) => (present ? runFrontDoorHook(prompt, root) : Promise.resolve(null)),
     guardrails: () => (present ? loadTaisceGuardrails(root) : null),
@@ -207,20 +200,12 @@ export function buildTaisceSessionDeps(
       resolveRepo: async () => (await gitTopLevel(process.cwd())) ?? (present ? root : null),
       trackedFiles: (repo) => gitTrackedFiles(repo),
       checkFiles: (repo, files) => {
-        // Inside Taisce, Aider may only be handed files guard-reads allows.
+        // Inside Taisce, planned files must pass guard-reads.
         if (realIfExists(repo) !== realIfExists(root)) return;
         for (const file of files) assertTaiscePathReadable(root, file);
       },
       coderModel: () => resolveCoderModel(),
-      aider: async (repo, options) => {
-        await assertSafeGitConfig(repo);
-        const result = await runAiderConfined(
-          repo,
-          { ...options, model: options.model ?? resolveCoderModel() },
-          defaultAiderRunner,
-        );
-        return { exitCode: result.exitCode, output: tidyAiderOutput(result.output) };
-      },
+      aider: () => defaultAiderRunner([], ""),
       diffStat: (repo) => gitDiffStat(repo),
       buildPlanPrompt: buildEditPlanPrompt,
       parsePlan: parseEditPlan,

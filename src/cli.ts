@@ -70,7 +70,7 @@ export function buildCli(options: BuildCliOptions = {}): Command {
   program
     .name("moss")
     .description(
-      "Moss — the local Tier 3 session. Ollama runs it, moss asks it, Aider edits with it. No arguments opens the session.",
+      "Moss — experimental local/hosted AI routing and approved text patches. Aider support is deprecated; local /edit is disabled. No arguments opens the session.",
     )
     .version(MOSS_VERSION, "-v, --version", "Print Moss version and exit")
     .option("--json", "Emit machine-readable JSON where supported")

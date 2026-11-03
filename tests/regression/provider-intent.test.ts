@@ -479,7 +479,7 @@ describe("session edit provider intent", () => {
     async function* input() {
       if (slashPin) yield `/provider ${provider}`;
       yield "/edit change f.txt";
-      yield "n";
+      if (provider !== "ollama") yield "n";
       yield "/exit";
     }
     await runChatSession({
@@ -509,17 +509,21 @@ describe("session edit provider intent", () => {
     });
     return { providers, received, route, aider, messages: s.err };
   }
-  it.each([false, true])("local pin reaches edit planning (slash=%s)", async (slash) => {
-    const s = await session("ollama", policyApiOn, undefined, slash);
-    expect(s.received[0]?.provider).toBe("ollama");
-    expect(s.route.mock.calls[0]?.[2]).toBe("ollama");
-    expect(s.providers.ollama.generate).toHaveBeenCalledOnce();
-    expect(s.aider).toHaveBeenCalledOnce();
-    for (const id of ["claude-code", "anthropic-api"] as const) {
-      expect(s.providers[id].probe).not.toHaveBeenCalled();
-      expect(s.providers[id].generate).not.toHaveBeenCalled();
-    }
-  });
+  it.each([false, true])(
+    "local pin refuses deprecated edits without hosted fallback (slash=%s)",
+    async (slash) => {
+      const s = await session("ollama", policyApiOn, undefined, slash);
+      expect(s.received).toEqual([]);
+      expect(s.messages.join("\n")).toContain("deprecated and disabled");
+      expect(s.route).not.toHaveBeenCalled();
+      expect(s.providers.ollama.generate).not.toHaveBeenCalled();
+      expect(s.aider).not.toHaveBeenCalled();
+      for (const id of ["claude-code", "anthropic-api"] as const) {
+        expect(s.providers[id].probe).not.toHaveBeenCalled();
+        expect(s.providers[id].generate).not.toHaveBeenCalled();
+      }
+    },
+  );
   it.each(["claude-code", "anthropic-api"] as const)(
     "explicit %s stays pinned through planning and diff generation",
     async (id) => {

@@ -17,6 +17,7 @@ describe("exec.run", () => {
     expect(allowed).toContain("pnpm");
     // `node` is intentionally NOT allowlisted: no production path spawns it.
     expect(allowed).not.toContain("node");
+    expect(allowed).not.toContain("aider");
   });
 
   it("isCommandAllowed returns false for disallowed commands", () => {
@@ -27,6 +28,7 @@ describe("exec.run", () => {
 
   it("rejects disallowed commands without spawning a process", async () => {
     await expect(run("rm", ["-rf", "/"])).rejects.toBeInstanceOf(ExecCommandNotAllowedError);
+    await expect(run("aider", ["--version"])).rejects.toBeInstanceOf(ExecCommandNotAllowedError);
   });
 
   it("runs an allowlisted command and returns stdout", async () => {
@@ -50,10 +52,10 @@ describe("exec.run", () => {
 });
 
 describe("session subprocesses", () => {
-  it("allowlists bash (Taisce hooks) and aider (/edit)", async () => {
+  it("allowlists bash hooks and refuses deprecated Aider execution", async () => {
     const { listAllowedCommands } = await import("../../src/lib/exec.ts");
     expect(listAllowedCommands()).toEqual(
-      expect.arrayContaining(["aider", "bash", "gh", "git", "ollama", "pnpm"]),
+      expect.arrayContaining(["bash", "gh", "git", "ollama", "pnpm"]),
     );
   });
 

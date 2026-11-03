@@ -1,5 +1,4 @@
-// The two ways `/edit` applies a plan: Aider on the local lane, or one Claude-written
-// unified diff on a Claude lane. Split from edit.ts; the flow and its contract live there.
+// Hosted unified-text patch application. Local Aider editing is deprecated.
 
 import { textPatchPaths } from "../lib/patch.ts";
 import type { EditContext, EditRoute, SessionEditDeps } from "./edit.ts";
@@ -14,19 +13,12 @@ async function askGo(ctx: EditContext): Promise<boolean> {
   return false;
 }
 
-async function finish(
-  ctx: EditContext,
-  edit: SessionEditDeps,
-  repo: string,
-  second: boolean,
-): Promise<void> {
+async function finish(ctx: EditContext, edit: SessionEditDeps, repo: string): Promise<void> {
   const stat = await edit.diffStat(repo);
   ctx.out("git diff --stat:");
   ctx.out(stat.length > 0 ? stat : "  (no changes)");
   ctx.out(
-    second
-      ? "Not committed. Read `git diff` — the apply is a second generation and can differ from the dry run."
-      : "Not committed. Applied exactly the diff shown above. Read `git diff` before committing.",
+    "Not committed. Applied exactly the diff shown above. Read `git diff` before committing.",
   );
 }
 
@@ -34,10 +26,9 @@ async function finishAfterApply(
   ctx: EditContext,
   edit: SessionEditDeps,
   repo: string,
-  second: boolean,
 ): Promise<boolean> {
   try {
-    await finish(ctx, edit, repo, second);
+    await finish(ctx, edit, repo);
     return true;
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -114,56 +105,5 @@ export async function claudeLane(
     );
     return false;
   }
-  return finishAfterApply(ctx, edit, repo, false);
-}
-
-export async function localLane(
-  ctx: EditContext,
-  edit: SessionEditDeps,
-  repo: string,
-  plan: string,
-  files: string[],
-  route: EditRoute,
-): Promise<boolean> {
-  const editor = route.editorModel ?? edit.coderModel();
-  const architect = route.model ?? undefined;
-  const opts = {
-    message: plan,
-    files,
-    ...(architect !== undefined ? { model: architect, editorModel: editor } : {}),
-  };
-  const who = architect !== undefined ? `architect ${architect} → editor ${editor}` : editor;
-  ctx.out(`· aider --dry-run with ${who} (Moss has not applied a patch)…`);
-  const dry = await edit.aider(repo, { ...opts, dryRun: true });
-  ctx.out(dry.output.length > 0 ? dry.output : "(aider printed nothing)");
-  if (dry.exitCode !== 0) {
-    ctx.err(`/edit: aider exited ${dry.exitCode} on the dry run; nothing was applied.`);
-    return false;
-  }
-  if (route.stageOnly) {
-    ctx.out(
-      "STAGE-ONLY (front-door gate): the dry run above is staged for you to read. Nothing was applied.",
-    );
-    return true;
-  }
-  if (!(await askGo(ctx))) return true;
-  ctx.out(`· aider applying with ${who} (no commit)…`);
-  let applied: { exitCode: number; output: string };
-  try {
-    applied = await edit.aider(repo, { ...opts, dryRun: false });
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    ctx.err(
-      `/edit: aider apply failed (${detail}). Moss cannot determine whether it changed some files; inspect git diff and git status before continuing. No completion is reported.`,
-    );
-    return false;
-  }
-  ctx.out(applied.output.length > 0 ? applied.output : "(aider printed nothing)");
-  if (applied.exitCode !== 0) {
-    ctx.err(
-      `/edit: aider exited ${applied.exitCode} during apply. Moss cannot determine whether it changed some files; inspect git diff and git status before continuing. No completion is reported.`,
-    );
-    return false;
-  }
-  return finishAfterApply(ctx, edit, repo, true);
+  return finishAfterApply(ctx, edit, repo);
 }

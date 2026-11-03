@@ -81,7 +81,7 @@ describe("machine", () => {
     ).toBe("SKIP");
   });
 
-  it("mac-setup doctor: clean, warning, missing; Node ≥22", async () => {
+  it("mac-setup doctor: clean, warning, missing; Node ≥24", async () => {
     const files = { "/D/mac-setup/bin/mac-setup": "#!/bin/bash" };
     expect((await one(macSetupDoctor, fakeCtx({ files }))).status).toBe("PASS");
     const warn = await one(
