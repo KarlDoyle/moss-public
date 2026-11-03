@@ -78,7 +78,7 @@ export interface RunCommandOptions {
   // per successful skill run with the metadata for a single usage
   // record. The real CLI wires the best-effort writer; library callers
   // and unit tests stay side-effect-free by default. See D-0019.
-  readonly recordUsage?: (input: UsageWriteInput) => Promise<void>;
+  readonly recordUsage?: (input: UsageWriteInput) => Promise<boolean> | Promise<void>;
   // Test seam for the Taisce-skill path's routing (policy, probes, dispatch).
   readonly taisceDeps?: TaisceRunDeps;
 }
@@ -222,16 +222,23 @@ export async function runRunCommand(options: RunCommandOptions): Promise<boolean
   // lane is logged truthfully rather than assumed to be Ollama. The
   // result also carries the model and any token/duration data the daemon
   // reported. Best-effort: never affects the run's outcome. See D-0019.
+  for (const warning of result.warnings ?? []) options.err(warning);
   if (options.recordUsage !== undefined) {
-    await options.recordUsage({
-      command: "run",
-      providerId: result.providerId,
-      model: result.model,
-      skill: result.skill.id,
-      ...(result.inputTokens !== undefined ? { inputTokens: result.inputTokens } : {}),
-      ...(result.outputTokens !== undefined ? { outputTokens: result.outputTokens } : {}),
-      ...(result.durationMs !== undefined ? { durationMs: result.durationMs } : {}),
-    });
+    try {
+      const recorded = await options.recordUsage({
+        command: "run",
+        providerId: result.providerId,
+        model: result.model,
+        skill: result.skill.id,
+        ...(result.inputTokens !== undefined ? { inputTokens: result.inputTokens } : {}),
+        ...(result.outputTokens !== undefined ? { outputTokens: result.outputTokens } : {}),
+        ...(result.durationMs !== undefined ? { durationMs: result.durationMs } : {}),
+      });
+      if (recorded === false)
+        options.err("Accounting incomplete: usage/ledger recording or cost data is incomplete.");
+    } catch {
+      options.err("Accounting incomplete: usage/ledger recording or cost data is incomplete.");
+    }
   }
 
   let reportPath: string | null = null;
@@ -306,7 +313,7 @@ export function registerRun(program: Command): void {
           writeReport: Boolean(commandOpts.writeReport),
           out: (line) => process.stdout.write(`${line}\n`),
           err: (line) => process.stderr.write(`${line}\n`),
-          recordUsage: (input_) => recordUsageBestEffort(input_).then(() => undefined),
+          recordUsage: (input_) => recordUsageBestEffort(input_),
         };
         if (commandOpts.room !== undefined) Object.assign(options, { roomId: commandOpts.room });
         if (commandOpts.model !== undefined)

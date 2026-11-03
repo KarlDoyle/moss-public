@@ -54,6 +54,22 @@ function io() {
 }
 
 describe("moss run <taisce-skill> — routed", () => {
+  it("preview uses its non-starting selector and performs no lifecycle cleanup", async () => {
+    const { d } = deps({ ollama: "available" });
+    const select = vi.fn(d.select);
+    const previewSelect = vi.fn(d.select);
+    const afterRun = vi.fn(async () => {
+      throw new Error("preview cleanup forbidden");
+    });
+    const s = io();
+    await runTaisceSkill(
+      { skillId: "capture", emitJson: false, explainOnly: true, out: s.o, err: s.e },
+      { ...d, select, previewSelect, afterRun },
+    );
+    expect(select).not.toHaveBeenCalled();
+    expect(previewSelect).toHaveBeenCalledOnce();
+    expect(afterRun).not.toHaveBeenCalled();
+  });
   it("capture is a brief task and runs local; the lane and model are printed", async () => {
     const { d, dispatch } = deps({ ollama: "available", "claude-code": "available" });
     const s = io();
@@ -97,7 +113,7 @@ describe("moss run <taisce-skill> — routed", () => {
     expect(dispatch).not.toHaveBeenCalled();
     expect(s.out[0]).toContain("task:   reason");
     expect(s.out[0]).toContain("· skipped claude-code");
-    expect(s.out[0]).toContain("nothing was run (--explain)");
+    expect(s.out[0]).toContain("no requested generation (--explain)");
   });
 
   it("no lane → an error with the whole explanation; a failed dispatch is reported", async () => {
@@ -187,7 +203,7 @@ describe("moss --explain <command>", () => {
     ).toBe(0);
     expect(
       await explainInvocation(
-        ["ask", "--task", "code-review", "review", "this"],
+        ["chat", "--task", "code-review", "review", "this"],
         s.o,
         s.e,
         explainDeps({ "claude-code": "available" }),
@@ -198,24 +214,24 @@ describe("moss --explain <command>", () => {
     expect(await explainInvocation(["run", "code-review"], s.o, s.e, explainDeps({}))).toBe(0);
     const text = s.out.join("\n");
     expect(text).toContain("moss run capture — route");
-    expect(text).toContain("moss ask — route");
+    expect(text).toContain("moss chat — route");
     expect(text).toContain("lane:   claude-code · sonnet");
     expect(text).toContain("the session — each typed prompt routes as 'brief'");
     expect(text).toContain("moss status — no model call");
     expect(text).toContain("not a Taisce skill");
   });
 
-  it("an ask whose prompt trips a gate is stage-only; a run with no skill is an error", async () => {
+  it("a chat prompt whose input trips a gate is stage-only; a run with no skill is an error", async () => {
     const s = io();
     await explainInvocation(
-      ["ask", "publish", "it"],
+      ["chat", "publish", "it"],
       s.o,
       s.e,
       explainDeps({ "claude-code": "available" }, "Domains: irreversible"),
     );
     expect(s.out.join("\n")).toContain("STAGE-ONLY");
     expect(await explainInvocation(["run"], s.o, s.e, explainDeps({}))).toBe(1);
-    expect(await explainInvocation(["ask", "x"], s.o, s.e, explainDeps({}))).toBe(1);
+    expect(await explainInvocation(["chat", "x"], s.o, s.e, explainDeps({}))).toBe(1);
   });
 });
 

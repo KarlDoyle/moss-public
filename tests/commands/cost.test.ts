@@ -28,8 +28,8 @@ describe("moss cost", () => {
     expect(t.find((x) => x.lane === "anthropic-api")).toMatchObject({
       calls: 2,
       eur: 1.5,
-      tokensIn: 1000,
-      tokensOut: 500,
+      tokensIn: null,
+      tokensOut: null,
     });
   });
 
@@ -37,9 +37,9 @@ describe("moss cost", () => {
     const text = formatCost(ledger, now, 2, "/x/lane-usage.jsonl");
     expect(text).toContain("today (2026-09-18)");
     expect(text).toMatch(
-      /anthropic-api +1 calls · +1\.5k tok · €0\.30 +2 calls · +1\.5k tok · €1\.50/,
+      /anthropic-api +1 calls · +1\.5k tok · €0\.30 +2 calls · +unknown tok · €1\.50/,
     );
-    expect(text).toMatch(/claude-code +1 calls · +2\.0k tok · sub \(~\$0\.05 list\)/);
+    expect(text).toMatch(/claude-code +1 calls · +unknown tok · sub \(~\$0\.05 list\)/);
     expect(text).toMatch(/ollama +0 calls · +0 tok · €0 +0 calls/);
     expect(text).toContain("API cap today: €0.30 of €2.00");
     expect(formatCost([], now, null, "f")).not.toContain("API cap");

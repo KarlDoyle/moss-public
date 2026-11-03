@@ -16,7 +16,7 @@ export type LaneTaskType = (typeof LANE_TASK_TYPES)[number];
 // How a lane's calls are paid for — also the `cost` field of every lane-usage ledger line.
 //   local — on this Mac, €0.   sub — the Claude subscription (no per-call bill).
 //   eur   — metered API spend, capped per day.   manual — a handoff, nothing is called.
-export type Billing = "local" | "sub" | "eur" | "manual";
+export type Billing = "local" | "sub" | "eur" | "manual" | "unknown";
 
 export interface ModelPrice {
   readonly id: string;
@@ -39,7 +39,7 @@ export type ClaudeAlias = keyof typeof CLAUDE_MODELS;
 export const CLAUDE_PRICES_VERIFIED = "2026-08-29";
 
 export function claudeModel(alias: string): ModelPrice | undefined {
-  if (alias in CLAUDE_MODELS) return CLAUDE_MODELS[alias as ClaudeAlias];
+  if (Object.hasOwn(CLAUDE_MODELS, alias)) return CLAUDE_MODELS[alias as ClaudeAlias];
   return Object.values(CLAUDE_MODELS).find((m) => m.id === alias);
 }
 
@@ -49,6 +49,12 @@ export function listPriceUsd(
   inputTokens: number,
   outputTokens: number,
 ): number | undefined {
+  if (
+    ![inputTokens, outputTokens].every(
+      (n) => Number.isSafeInteger(n) && n >= 0 && n <= 1_000_000_000,
+    )
+  )
+    return undefined;
   const price = claudeModel(model);
   if (price === undefined) return undefined;
   return (inputTokens * price.inUsd + outputTokens * price.outUsd) / 1_000_000;
@@ -92,7 +98,7 @@ export const PROVIDER_METADATA = {
     taskSuitability: ["ask", "code-review"],
   },
   litellm: {
-    billing: "local",
+    billing: "unknown",
     capabilities: TEXT_TASKS,
     maxContext: null,
     offlineSupport: false,

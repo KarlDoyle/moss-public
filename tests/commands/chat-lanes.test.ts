@@ -39,6 +39,16 @@ describe("routedGenerate — a session turn on the routed lane", () => {
     expect(dispatch.mock.calls[0]?.[2]).toEqual({ prompt: "hi", system: "RULES", command: "chat" });
   });
 
+  it("forwards timeout and cancellation to the selected task-policy provider", async () => {
+    const { d, dispatch } = deps({ ollama: "available" });
+    const controller = new AbortController();
+    await routedGenerate({ prompt: "fixture", timeoutMs: 1234, signal: controller.signal }, d);
+    expect(dispatch.mock.calls[0]?.[2]).toMatchObject({
+      timeoutMs: 1234,
+      signal: controller.signal,
+    });
+  });
+
   it("a reasoning skill goes to Claude; a gated prompt is stage-only", async () => {
     const { d } = deps({ "claude-code": "available" });
     expect((await routedGenerate({ prompt: "x", task: "reason" }, d)).route).toBe(
@@ -130,11 +140,11 @@ describe("claudeDiff + applyPatch against a real repo", () => {
     ];
     expect(choice).toMatchObject({ lane: "claude-code", model: "opus" });
     expect(input.prompt).toContain("FILE a.py\n```\nx = 0\n");
-    expect((await applyPatch(repo, diff, true)).ok).toBe(true);
+    expect((await applyPatch(repo, diff, true, ["a.py"])).ok).toBe(true);
     expect(readFileSync(join(repo, "a.py"), "utf8")).toBe("x = 0\n");
-    expect((await applyPatch(repo, diff, false)).ok).toBe(true);
+    expect((await applyPatch(repo, diff, false, ["a.py"])).ok).toBe(true);
     expect(readFileSync(join(repo, "a.py"), "utf8")).toBe("x = 1\n");
-    const again = await applyPatch(repo, diff, true);
+    const again = await applyPatch(repo, diff, true, ["a.py"]);
     expect(again.ok).toBe(false);
     expect(again.output).toContain("patch does not apply");
   });

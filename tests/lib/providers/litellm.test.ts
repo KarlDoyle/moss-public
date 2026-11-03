@@ -128,6 +128,24 @@ describe("liteLlmGenerate", () => {
     expect(body.messages[0]).toEqual({ role: "system", content: "You are a tester." });
   });
 
+  it("forwards the requested timeout and cancellation signal", async () => {
+    const netFetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      body: JSON.stringify({ choices: [{ message: { content: "fixture" } }] }),
+    }));
+    const controller = new AbortController();
+    await liteLlmGenerate(
+      { task: "ask", prompt: "fixture", model: "m", timeoutMs: 1234, signal: controller.signal },
+      deps({ loadConfig: async () => ENABLED, netFetch }),
+    );
+    const call = netFetch.mock.calls[0] as unknown as [
+      string,
+      { timeoutMs: number; signal: AbortSignal },
+    ];
+    expect(call[1]).toMatchObject({ timeoutMs: 1234, signal: controller.signal });
+  });
+
   it("rejects when no model is provided", async () => {
     await expect(
       liteLlmGenerate({ task: "ask", prompt: "hi" }, deps({ loadConfig: async () => ENABLED })),

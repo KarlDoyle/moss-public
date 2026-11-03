@@ -66,9 +66,9 @@ describe("runAuthCommand", () => {
       }
       // The selected provider is marked with a `*`.
       expect(text).toMatch(/\* ollama/);
-      // Read-only disclaimer present.
-      expect(text).toContain("read-only");
-      expect(text).toContain("does not read API keys");
+      // Availability probe effects are disclosed.
+      expect(text).toContain("skips requested generation");
+      expect(text).toContain("may read configured credentials");
     });
 
     it("the JSON shape carries selectedProvider, fallbackProviders, providers[], and probedAt", async () => {
@@ -158,10 +158,11 @@ describe("runAuthCommand", () => {
       expect(result.ok).toBe(true);
       const text = out.join("\n");
       expect(text).toMatch(/\* ollama/);
-      // anthropic-api and litellm appear without `*` but as fallback rows.
+      // Disabled API remains visible; only the eligible proxy is a fallback.
       expect(text).toMatch(/ {2}anthropic-api/);
       expect(text).toMatch(/ {2}litellm/);
-      expect(text).toContain("Fallback chain: anthropic-api -> litellm");
+      expect(text).toContain("Fallback chain: litellm");
+      expect(text).toContain("caps.anthropic-api.enabled: false");
     });
   });
 

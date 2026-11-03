@@ -2,24 +2,26 @@ import { existsSync, realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
 import type { Command } from "commander";
 import {
-  buildAiderArgs,
   buildEditPlanPrompt,
   defaultAiderRunner,
   parseEditPlan,
   pickFiles,
+  runAiderConfined,
   tidyAiderOutput,
 } from "../lib/aider.ts";
-import { gitDiffStat, gitTopLevel, gitTrackedFiles } from "../lib/git.ts";
+import { assertSafeGitConfig, gitDiffStat, gitTopLevel, gitTrackedFiles } from "../lib/git.ts";
 import { defaultHealthCtx } from "../lib/health/context.ts";
 import { renderReport, runChecks } from "../lib/health/runner.ts";
+import { renderLaneChoice } from "../lib/lanes/explain.ts";
 import { loadRoutingPolicy, taskForSkill } from "../lib/lanes/policy.ts";
+import { defaultSelectDeps } from "../lib/lanes/runtime.ts";
+import { selectLane } from "../lib/lanes/select.ts";
+import { requestPins } from "../lib/lanes/skill-plan.ts";
 import { assertChatModel, resolveCoderModel, resolveNumCtx } from "../lib/ollama.ts";
 import { ollamaUse, turnOffOllama } from "../lib/ollama-lifecycle.ts";
 import { assertTaiscePathReadable, getProjectRoot, resolveTaisceRoot } from "../lib/paths.ts";
-import { formatRouteExplanationHuman } from "../lib/providers/explain-render.ts";
 import { PROVIDER_IDS, type ProviderId } from "../lib/providers/index.ts";
 import { claudeModel } from "../lib/providers/metadata.ts";
-import { defaultRouterDependencies, explainProviderRoute } from "../lib/providers/router.ts";
 import { bestModel, defaultRegistryDependencies, loadRegistry } from "../lib/registry.ts";
 import { runFrontDoorHook, runSessionStartHook } from "../lib/taisce/hooks.ts";
 import {
@@ -50,9 +52,13 @@ import { formatLaneStatus, gatherLaneStatus } from "./lane-status.ts";
 // The response text is captured rather than printed directly so the session
 // owns all output formatting.
 export async function chatGenerate(params: ChatGenerateParams): Promise<ChatGenerateResult> {
-  // Routed by config/routing.yaml unless the operator pinned a legacy lane with /provider or a
-  // karl-context profile with /context — those keep the pre-router `moss ask` path.
-  if (params.provider === undefined && params.contextProfile === undefined) {
+  // Session pins stay on policy routing; context profiles and optional
+  // manual/proxy lanes use ask with the same pin/API constraints.
+  if (
+    params.contextProfile === undefined &&
+    params.provider !== "cursor-manual" &&
+    params.provider !== "litellm"
+  ) {
     return routedGenerate(params);
   }
   return legacyGenerate(params);
@@ -89,11 +95,15 @@ async function legacyGenerate(params: ChatGenerateParams): Promise<ChatGenerateR
       lastError = line;
     },
     usageCommand: "chat",
+    task: request.task === "reason" || request.task === "edit" ? "code-review" : "ask",
     ...(request.system !== undefined ? { system: request.system } : {}),
-    recordUsage: (input) => recordUsageBestEffort(input).then(() => undefined),
+    recordUsage: (input) => recordUsageBestEffort(input),
     ...(request.model !== undefined ? { model: request.model } : {}),
     ...(request.provider !== undefined ? { provider: request.provider } : {}),
     ...(request.contextProfile !== undefined ? { karlContextProfile: request.contextProfile } : {}),
+    ...(request.maxRequestBytes !== undefined ? { maxRequestBytes: request.maxRequestBytes } : {}),
+    ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {}),
+    ...(request.signal !== undefined ? { signal: request.signal } : {}),
   };
 
   const result = await runAskCommand(options);
@@ -102,6 +112,7 @@ async function legacyGenerate(params: ChatGenerateParams): Promise<ChatGenerateR
       ok: true,
       response: captured.join("\n"),
       ...(result.model !== undefined ? { model: result.model } : {}),
+      ...(result.warnings !== undefined ? { warnings: result.warnings } : {}),
     };
   }
   return { ok: false, error: result.error ?? lastError ?? "generation failed." };
@@ -111,13 +122,19 @@ async function legacyGenerate(params: ChatGenerateParams): Promise<ChatGenerateR
 // Mirrors `moss ask --explain`: uses the deterministic router, shrinking the
 // lane list to the pinned provider when one is set, and returns the shared
 // human-readable render. Probes are read-only (D-0009); nothing is executed.
-export async function chatExplainRoute(provider: ProviderId | undefined): Promise<string> {
-  const routerDeps =
-    provider !== undefined
-      ? { ...defaultRouterDependencies, listProviders: () => [provider] }
-      : defaultRouterDependencies;
-  const explanation = await explainProviderRoute("ask", routerDeps);
-  return formatRouteExplanationHuman(explanation, { heading: "moss chat — route preview" });
+export async function chatExplainRoute(
+  provider: ProviderId | undefined,
+  model?: string,
+): Promise<string> {
+  const choice = await selectLane(
+    loadRoutingPolicy(),
+    { task: "brief", promptTokens: 0, ...requestPins(model, provider) },
+    defaultSelectDeps(),
+  );
+  return renderLaneChoice(
+    choice,
+    "moss chat — default brief route preview (prompt gates may change the route)",
+  );
 }
 
 function parseProvider(value: string): ProviderId {
@@ -136,7 +153,7 @@ export function buildTaisceSessionDeps(
   const liveSkills = (): SessionSkill[] => (present ? listLiveTaisceSkills(root) : []);
   return {
     banner:
-      "moss — Taisce session, local model. Ollama runs it, moss asks it, Aider edits with it. /help lists everything, /exit leaves.",
+      "moss — Taisce session, local model. Ollama runs it and moss asks it. Optional Aider edits are unsupported. /help lists everything, /exit leaves.",
     brief: () => (present ? runSessionStartHook(root) : Promise.resolve(null)),
     frontDoor: (prompt) => (present ? runFrontDoorHook(prompt, root) : Promise.resolve(null)),
     guardrails: () => (present ? loadTaisceGuardrails(root) : null),
@@ -180,7 +197,7 @@ export function buildTaisceSessionDeps(
     },
     checkModel: assertChatModel,
     isClaudeModel: (name) => claudeModel(name) !== undefined,
-    routeTable: (pinned) => routeTable(pinned),
+    routeTable: (pinned, provider) => routeTable(pinned, undefined, provider),
     check: async () => {
       const results = await runChecks(allChecks(), defaultHealthCtx(false));
       return renderReport(results, new Date());
@@ -196,9 +213,11 @@ export function buildTaisceSessionDeps(
       },
       coderModel: () => resolveCoderModel(),
       aider: async (repo, options) => {
-        const result = await defaultAiderRunner(
-          buildAiderArgs({ ...options, model: options.model ?? resolveCoderModel() }),
+        await assertSafeGitConfig(repo);
+        const result = await runAiderConfined(
           repo,
+          { ...options, model: options.model ?? resolveCoderModel() },
+          defaultAiderRunner,
         );
         return { exitCode: result.exitCode, output: tidyAiderOutput(result.output) };
       },
@@ -206,10 +225,16 @@ export function buildTaisceSessionDeps(
       buildPlanPrompt: buildEditPlanPrompt,
       parsePlan: parseEditPlan,
       pickFiles: (text, tracked) => pickFiles(text, tracked),
-      route: async (ask, pinned) =>
-        editRoute(ask, pinned, present ? await runFrontDoorHook(ask, root) : null),
+      route: async (ask, pinned, provider) =>
+        editRoute(
+          ask,
+          pinned,
+          present ? await runFrontDoorHook(ask, root) : null,
+          undefined,
+          provider,
+        ),
       claudeDiff: (repo, plan, files, route) => claudeDiff(repo, plan, files, route),
-      applyPatch: (repo, diff, check) => applyPatch(repo, diff, check),
+      applyPatch: (repo, diff, check, files) => applyPatch(repo, diff, check, files),
     },
   };
 }
@@ -227,6 +252,8 @@ export async function startSession(
     output: process.stdout,
     prompt: "moss › ",
   });
+  const controller = new AbortController();
+  let terminationCode: number | undefined;
   // Piped input (a script, a test) can reach EOF while a model turn is still running;
   // prompting a closed interface throws, so the prompt is skipped once input has ended.
   let closed = false;
@@ -243,6 +270,11 @@ export async function startSession(
     },
     projectRoot: () => getProjectRoot(),
     generate: chatGenerate,
+    signal: controller.signal,
+    batchMode: process.stdin.isTTY !== true,
+    onBatchFailure: () => {
+      process.exitCode = 1;
+    },
     explainRoute: chatExplainRoute,
     ...buildTaisceSessionDeps(),
     ...(commandOpts.model !== undefined ? { initialModel: commandOpts.model } : {}),
@@ -259,17 +291,25 @@ export async function startSession(
     const result = await turnOffOllama();
     process.stdout.write(`· ${result.message}\n`);
   };
-  const onSignal = (): void => {
-    void endOllama().finally(() => process.exit(0));
+  const onSignal = (signal: NodeJS.Signals): void => {
+    terminationCode = 128 + (signal === "SIGINT" ? 2 : signal === "SIGHUP" ? 1 : 15);
+    controller.abort(new Error(`chat interrupted by ${signal}`));
+    rl.close();
   };
-  process.once("SIGHUP", onSignal);
-  process.once("SIGTERM", onSignal);
+  const onSigint = (): void => onSignal("SIGINT");
+  const onSighup = (): void => onSignal("SIGHUP");
+  const onSigterm = (): void => onSignal("SIGTERM");
+  process.once("SIGINT", onSigint);
+  process.once("SIGHUP", onSighup);
+  process.once("SIGTERM", onSigterm);
   try {
     await runChatSession(deps);
+    if (terminationCode !== undefined) process.exitCode = terminationCode;
   } finally {
     rl.close();
-    process.off("SIGHUP", onSignal);
-    process.off("SIGTERM", onSignal);
+    process.off("SIGINT", onSigint);
+    process.off("SIGHUP", onSighup);
+    process.off("SIGTERM", onSigterm);
     await endOllama();
   }
 }

@@ -68,6 +68,18 @@ function setup(route: EditRoute, answers: string[], overrides: Partial<SessionEd
 }
 
 describe("/edit on a Claude lane", () => {
+  it("shows accounting warnings even when a successful provider returns an empty diff", async () => {
+    const s = setup(claude, [], {
+      claudeDiff: async () => ({
+        ok: true,
+        diff: "\n",
+        warnings: ["Accounting incomplete: lane ledger write failed."],
+      }),
+    });
+    await runEdit(s.ctx, "set x in a.py");
+    expect(s.err).toContain("Accounting incomplete: lane ledger write failed.");
+    expect(s.applyPatch).not.toHaveBeenCalled();
+  });
   it("plans on the edit lane, shows the diff, checks it, and applies exactly that diff on go", async () => {
     const s = setup(claude, ["y"]);
     await runEdit(s.ctx, "set x in a.py");
@@ -85,9 +97,20 @@ describe("/edit on a Claude lane", () => {
     expect(s.out.join("\n")).toContain("not applied");
   });
 
+  it("reports failed patch application without claiming no partial changes", async () => {
+    const s = setup(claude, ["y"], {
+      applyPatch: async (_repo, _diff, check) =>
+        check ? { ok: true, output: "" } : { ok: false, output: "fixture apply failure" },
+    });
+    await runEdit(s.ctx, "set x in a.py");
+    expect(s.err.join("\n")).toContain("git apply failed: fixture apply failure");
+    expect(s.err.join("\n")).toContain("Inspect git diff and git status");
+    expect(s.out.join("\n")).not.toContain("Applied exactly the diff shown above");
+  });
+
   it("refuses a diff that strays outside the plan, or does not apply cleanly, or is empty", async () => {
     const stray = setup(claude, ["y"], {
-      claudeDiff: async () => ({ ok: true, diff: `${DIFF}--- a/b.py\n+++ b/b.py\n` }),
+      claudeDiff: async () => ({ ok: true, diff: `${DIFF}${DIFF.replaceAll("a.py", "b.py")}` }),
     });
     await runEdit(stray.ctx, "set x in a.py");
     expect(stray.err[0]).toContain("outside the plan (b.py)");
@@ -150,6 +173,35 @@ describe("/edit on the local lane", () => {
     expect(s.out.join("\n")).toContain("second generation");
   });
 
+  it("reports a failed Aider apply as possibly partial and skips normal completion", async () => {
+    const aider = vi.fn(async (_repo: string, options: { dryRun: boolean }) =>
+      options.dryRun
+        ? { exitCode: 0, output: "dry" }
+        : { exitCode: 23, output: "partial edit before failure" },
+    );
+    const diffStat = vi.fn(async () => "unexpected normal summary");
+    const s = setup(local, ["go"], { aider, diffStat });
+    await runEdit(s.ctx, "set x in a.py");
+    expect(s.err.join("\n")).toContain("exited 23 during apply");
+    expect(s.err.join("\n")).toContain("inspect git diff and git status");
+    expect(s.out.join("\n")).not.toContain("Not committed. Read `git diff`");
+    expect(diffStat).not.toHaveBeenCalled();
+  });
+
+  it("reports a thrown Aider apply as possibly partial", async () => {
+    const aider = vi.fn(async (_repo: string, options: { dryRun: boolean }) => {
+      if (options.dryRun) return { exitCode: 0, output: "dry" };
+      throw new Error("controlled timeout");
+    });
+    const diffStat = vi.fn(async () => "unexpected normal summary");
+    const s = setup(local, ["go"], { aider, diffStat });
+    await runEdit(s.ctx, "set x in a.py");
+    expect(s.err.join("\n")).toContain("aider apply failed (controlled timeout)");
+    expect(s.err.join("\n")).toContain("inspect git diff and git status");
+    expect(s.out.join("\n")).not.toContain("Not committed. Read `git diff`");
+    expect(diffStat).not.toHaveBeenCalled();
+  });
+
   it("stage-only stops after the dry run", async () => {
     const s = setup({ ...local, stageOnly: true }, ["y"]);
     await runEdit(s.ctx, "set x in a.py");
@@ -165,7 +217,8 @@ describe("/edit on the local lane", () => {
 });
 
 describe("diffPaths", () => {
-  it("lists every file a diff touches, ignoring /dev/null", () => {
-    expect(diffPaths(`${DIFF}--- /dev/null\n+++ b/new.py\n`)).toEqual(["a.py", "new.py"]);
+  it("lists text modifications and refuses creation headers", () => {
+    expect(diffPaths(DIFF)).toEqual(["a.py"]);
+    expect(() => diffPaths(`${DIFF}--- /dev/null\n+++ b/new.py\n`)).toThrow();
   });
 });

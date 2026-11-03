@@ -19,6 +19,7 @@ import {
   type RouterDependencies,
   routeAndGenerate,
 } from "../../../src/lib/providers/router.ts";
+import { policyApiOn } from "../lanes/fixtures.ts";
 
 const FROZEN_NOW = () => new Date("2026-05-22T15:00:00.000Z");
 
@@ -60,6 +61,8 @@ function depsWithProviders(
     listProviders,
     getProvider: (id) => providers[id],
     now: FROZEN_NOW,
+    policy: () => policyApiOn,
+    eurSpentToday: () => 0,
   };
 }
 
@@ -201,7 +204,56 @@ describe("router.explainProviderRoute", () => {
   });
 });
 
+describe("provider request byte budget", () => {
+  it("refuses a multibyte prompt before any provider generation", async () => {
+    const generate = vi.fn(async () => ({
+      providerId: "ollama" as const,
+      model: "m",
+      response: "r",
+    }));
+    const ollama = fakeProvider({ id: "ollama", status: "available", generate });
+    await expect(
+      routeAndGenerate(
+        "ask",
+        { task: "ask", prompt: "ééé", model: "fixture", maxRequestBytes: 5 },
+        depsWithProviders({ ollama }, () => ["ollama"]),
+      ),
+    ).rejects.toThrow(/request is 6 bytes.*limit is 5 bytes/);
+    expect(generate).not.toHaveBeenCalled();
+  });
+});
+
 describe("router.routeAndGenerate", () => {
+  it("does not fall back after cancellation and preserves timeout/signal for the attempt", async () => {
+    const controller = new AbortController();
+    const stopped = new Error("fixture cancellation");
+    const primaryGenerate = vi.fn(async (options: { timeoutMs?: number; signal?: AbortSignal }) => {
+      expect(options.timeoutMs).toBe(1234);
+      expect(options.signal).toBe(controller.signal);
+      controller.abort(stopped);
+      throw new OllamaDaemonUnavailableError("fixture cancellation");
+    });
+    const fallbackGenerate = vi.fn(async () => ({
+      providerId: "anthropic-api" as const,
+      model: "m",
+      response: "must not dispatch",
+    }));
+    const ollama = fakeProvider({ id: "ollama", status: "available", generate: primaryGenerate });
+    const api = fakeProvider({
+      id: "anthropic-api",
+      status: "available",
+      generate: fallbackGenerate,
+    });
+    await expect(
+      routeAndGenerate(
+        "ask",
+        { task: "ask", prompt: "fixture", timeoutMs: 1234, signal: controller.signal },
+        depsWithProviders({ ollama, "anthropic-api": api }, () => ["ollama", "anthropic-api"]),
+      ),
+    ).rejects.toBe(stopped);
+    expect(fallbackGenerate).not.toHaveBeenCalled();
+  });
+
   it("dispatches to the selected provider and returns its result + explanation", async () => {
     const generate = vi.fn(async () => ({
       providerId: "ollama" as ProviderId,
@@ -327,7 +379,7 @@ describe("router.routeAndGenerate — M11 fallback cascade", () => {
     });
     const { result, explanation } = await routeAndGenerate(
       "ask",
-      { task: "ask", prompt: "hello", model: "m" },
+      { task: "ask", prompt: "hello", model: "m", modelIsDefault: true },
       depsWithProviders({ ollama, litellm }, () => ["ollama", "litellm"]),
     );
     expect(result.providerId).toBe("litellm");
@@ -360,7 +412,7 @@ describe("router.routeAndGenerate — M11 fallback cascade", () => {
     await expect(
       routeAndGenerate(
         "ask",
-        { task: "ask", prompt: "p", model: "m" },
+        { task: "ask", prompt: "p", model: "m", modelIsDefault: true },
         depsWithProviders({ ollama, litellm }, () => ["ollama", "litellm"]),
       ),
     ).rejects.toBeInstanceOf(NetworkBoundaryError);
@@ -388,7 +440,7 @@ describe("router.routeAndGenerate — M11 fallback cascade", () => {
     await expect(
       routeAndGenerate(
         "ask",
-        { task: "ask", prompt: "p", model: "m" },
+        { task: "ask", prompt: "p", model: "m", modelIsDefault: true },
         depsWithProviders({ ollama, litellm }, () => ["ollama", "litellm"]),
       ),
     ).rejects.toThrow("unexpected bug");
@@ -430,7 +482,7 @@ describe("router.routeAndGenerate — M11 fallback cascade", () => {
     });
     const error = await routeAndGenerate(
       "ask",
-      { task: "ask", prompt: "p", model: "m" },
+      { task: "ask", prompt: "p", model: "m", modelIsDefault: true },
       depsWithProviders({ ollama, litellm }, () => ["ollama", "litellm"]),
     ).catch((e) => e);
     expect(error).toBeInstanceOf(AllProvidersFailedError);
@@ -480,7 +532,7 @@ describe("router.routeAndGenerate — M11 fallback cascade", () => {
     });
     const { result } = await routeAndGenerate(
       "ask",
-      { task: "ask", prompt: "hi", model: "m" },
+      { task: "ask", prompt: "hi", model: "m", modelIsDefault: true, provider: "cursor-manual" },
       depsWithProviders({ "cursor-manual": cursor }, () => ["cursor-manual"]),
     );
     expect(result.providerId).toBe("cursor-manual");

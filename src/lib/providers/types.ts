@@ -179,6 +179,7 @@ export interface ProviderGenerateOptions {
   readonly system?: string;
   readonly temperature?: number;
   readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
   // Output cap for lanes that take one (anthropic-api `max_tokens`). Ollama keeps its own
   // num_predict cap in src/lib/ollama.ts.
   readonly maxTokens?: number;
@@ -215,6 +216,7 @@ export interface ProviderGenerateResult {
   readonly providerId: ProviderId;
   readonly model: string;
   readonly response: string;
+  readonly warnings?: readonly string[];
   readonly durationMs?: number;
   // Token usage reported by the provider for this generation, when it
   // exposes one (e.g. Ollama's prompt_eval_count / eval_count). Optional

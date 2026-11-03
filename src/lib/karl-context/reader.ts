@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { readdir, readFile } from "node:fs/promises";
+import { open, readdir } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
+import { truncateUtf8, utf8Bytes } from "../utf8.ts";
 import { resolveInsideRoot, resolveKarlContextRoot } from "./confine.ts";
 import type { ContextFileProvenance, ContextPacket, KarlContextConfig } from "./types.ts";
 
@@ -22,7 +23,32 @@ export class KarlContextProfileError extends Error {
 
 export interface KarlContextReaderDeps {
   readonly listDir: (dir: string) => Promise<readonly { name: string; isDir: boolean }[]>;
-  readonly readFile: (path: string) => Promise<string>;
+  readonly readFile: (
+    path: string,
+    maxBytes: number,
+  ) => Promise<{ content: string; truncated: boolean }>;
+}
+
+async function readBoundedUtf8(
+  path: string,
+  maxBytes: number,
+): Promise<{ content: string; truncated: boolean }> {
+  const file = await open(path, "r");
+  try {
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let bytesRead = 0;
+    while (bytesRead < buffer.length) {
+      const result = await file.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+      if (result.bytesRead === 0) break;
+      bytesRead += result.bytesRead;
+    }
+    return {
+      content: truncateUtf8(buffer.subarray(0, bytesRead).toString("utf8"), maxBytes),
+      truncated: bytesRead > maxBytes,
+    };
+  } finally {
+    await file.close();
+  }
 }
 
 export const defaultKarlContextReaderDeps: KarlContextReaderDeps = {
@@ -30,7 +56,7 @@ export const defaultKarlContextReaderDeps: KarlContextReaderDeps = {
     const entries = await readdir(dir, { withFileTypes: true });
     return entries.map((e) => ({ name: e.name, isDir: e.isDirectory() }));
   },
-  readFile: (path) => readFile(path, "utf8"),
+  readFile: readBoundedUtf8,
 };
 
 // Minimal glob -> RegExp over POSIX-relative paths. Supports `**` (any depth,
@@ -91,8 +117,7 @@ function sha256(text: string): string {
 }
 
 // Assemble the packet for one profile. Deterministic: files are sorted by
-// relative path and added whole until `maxBytes` would be exceeded (soft cap;
-// a single oversized first file is still included, marked truncated).
+// relative path and their included source text is bounded by `maxBytes`.
 export async function assembleContextPacket(
   config: KarlContextConfig,
   profile: string,
@@ -115,16 +140,18 @@ export async function assembleContextPacket(
   for (const rel of matched) {
     // Re-validate each path stays inside the root (symlink/traversal defence).
     const abs = resolveInsideRoot(root, rel);
-    const content = await deps.readFile(abs);
-    const bytes = Buffer.byteLength(content, "utf8");
-    if (totalBytes > 0 && totalBytes + bytes > config.maxBytes) {
+    const remaining = config.maxBytes - totalBytes;
+    if (remaining <= 0) {
       truncated = true;
       break;
     }
+    const read = await deps.readFile(abs, remaining);
+    const content = read.content;
+    const bytes = utf8Bytes(content);
     files.push({ path: rel, sha256: sha256(content), bytes });
     sections.push(`# ${rel}\n\n${content}`);
     totalBytes += bytes;
-    if (totalBytes >= config.maxBytes) {
+    if (read.truncated) {
       truncated = true;
       break;
     }

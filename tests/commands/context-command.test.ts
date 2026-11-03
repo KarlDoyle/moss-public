@@ -12,7 +12,7 @@ function harness() {
 const readerDeps: KarlContextReaderDeps = {
   listDir: async (dir) =>
     dir.endsWith("root") || dir === ROOT ? [{ name: "a.md", isDir: false }] : [],
-  readFile: async () => "hello",
+  readFile: async () => ({ content: "hello", truncated: false }),
 };
 const ROOT = process.cwd();
 

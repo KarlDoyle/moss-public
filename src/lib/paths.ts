@@ -1,7 +1,18 @@
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, normalize, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parse as parseYaml } from "yaml";
+import { z } from "zod";
 
 const HOME = homedir();
 const FALLBACK_ROOT = resolve(HOME, "Dev", "moss");
@@ -65,7 +76,13 @@ function ensureAbsolute(input: string): string {
 function realpathDeepestAncestor(target: string): string {
   let head = target;
   const tail: string[] = [];
-  while (!existsSync(head)) {
+  while (true) {
+    try {
+      lstatSync(head);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
     const parent = dirname(head);
     if (parent === head) {
       return target;
@@ -184,24 +201,76 @@ function isUnderDeniedTaisceTree(relPath: string): boolean {
   return TAISCE_DENIED_TREES.some((tree) => posix === tree || posix.startsWith(`${tree}/`));
 }
 
-// Reads only the YAML frontmatter block (first ~40 lines), exactly as
-// guard-reads.sh does, and never returns file contents to the caller.
-function taisceFrontmatterDenies(absolutePath: string): boolean {
+const TAISCE_FRONTMATTER_MAX_BYTES = 64 * 1024;
+const TaisceSensitivityFrontmatterSchema = z
+  .object({
+    sensitivity: z.enum(["public", "private", "highly_private"]).optional(),
+    load_policy: z.enum(["default", "explicit_only"]).optional(),
+  })
+  .passthrough();
+
+// Read and parse the complete, bounded YAML frontmatter. Unknown or malformed
+// policy labels fail closed; ordinary files without frontmatter have no label.
+// File contents never leave this guard.
+function taisceFrontmatterDenies(absolutePath: string, relPath: string): boolean {
   if (!existsSync(absolutePath)) return false;
-  let raw: string;
+  let fd: number;
   try {
-    raw = readFileSync(absolutePath, "utf8");
+    fd = openSync(absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW);
   } catch {
-    return false;
+    throw new TaisceGuardedPathError(relPath, "has unreadable or ambiguous frontmatter");
   }
-  const lines = raw.split("\n").slice(0, 40);
+  let raw: string;
+  let frontmatterBomBytes = 0;
+  try {
+    const bytes = Buffer.alloc(TAISCE_FRONTMATTER_MAX_BYTES + 1);
+    let bytesRead = 0;
+    while (bytesRead < bytes.length) {
+      const count = readSync(fd, bytes, bytesRead, bytes.length - bytesRead, bytesRead);
+      if (count === 0) break;
+      bytesRead += count;
+    }
+    raw = bytes.subarray(0, bytesRead).toString("utf8");
+    if (raw.startsWith("\uFEFF")) {
+      raw = raw.slice(1);
+      frontmatterBomBytes = 3;
+    }
+  } catch {
+    throw new TaisceGuardedPathError(relPath, "has unreadable or ambiguous frontmatter");
+  } finally {
+    closeSync(fd);
+  }
+
+  const rawLines = raw.split("\n");
+  const lines = rawLines.map((line) => line.replace(/\r$/, ""));
   if ((lines[0] ?? "").trim() !== "---") return false;
-  for (const line of lines.slice(1)) {
-    if (line.trim() === "---") break;
-    if (/^sensitivity:\s*"?highly_private"?\s*$/.test(line.trim())) return true;
-    if (/^load_policy:\s*"?explicit_only"?\s*$/.test(line.trim())) return true;
+  const end = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
+  if (
+    end === -1 ||
+    Buffer.byteLength(rawLines.slice(0, end + 1).join("\n"), "utf8") + frontmatterBomBytes >
+      TAISCE_FRONTMATTER_MAX_BYTES
+  ) {
+    throw new TaisceGuardedPathError(relPath, "has missing or oversized frontmatter");
   }
-  return false;
+
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(lines.slice(1, end).join("\n"));
+  } catch {
+    throw new TaisceGuardedPathError(relPath, "has malformed sensitivity frontmatter");
+  }
+  const labels = TaisceSensitivityFrontmatterSchema.safeParse(parsed);
+  if (!labels.success) {
+    throw new TaisceGuardedPathError(
+      relPath,
+      "has unknown or ambiguous sensitivity/load-policy labels",
+    );
+  }
+  return (
+    labels.data.sensitivity === "private" ||
+    labels.data.sensitivity === "highly_private" ||
+    labels.data.load_policy === "explicit_only"
+  );
 }
 
 // Asserts a path inside the Taisce checkout is safe to read and returns its
@@ -236,8 +305,11 @@ export function assertTaiscePathReadable(root: string, relPath: string): string 
   if (isUnderDeniedTaisceTree(rel)) {
     throw new TaisceGuardedPathError(rel, "is a sensitivity-gated tree");
   }
-  if (taisceFrontmatterDenies(realTarget)) {
-    throw new TaisceGuardedPathError(rel, "is marked highly_private/explicit_only in frontmatter");
+  if (taisceFrontmatterDenies(realTarget, rel)) {
+    throw new TaisceGuardedPathError(
+      rel,
+      "is marked private/highly_private/explicit_only in frontmatter",
+    );
   }
   return absolute;
 }

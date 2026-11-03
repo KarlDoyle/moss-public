@@ -76,6 +76,45 @@ function isPulled(model: string, pulled: readonly string[]): boolean {
 
 const eur2 = (n: number) => `€${n.toFixed(2)}`;
 
+// Selection-time estimate, shared with the legacy router and rechecked at dispatch.
+// Unknown pricing or recorded spend is a refusal, never zero available spend.
+export function meteredRefusal(
+  policy: RoutingPolicy,
+  model: string,
+  input: number,
+  output: number,
+  spent: () => number,
+): string | null {
+  const off = laneSwitchedOff(policy, "anthropic-api");
+  if (off !== null) return off;
+  const usd = listPriceUsd(model, input, output);
+  if (
+    usd === undefined ||
+    !Number.isFinite(usd) ||
+    usd < 0 ||
+    !Number.isFinite(input) ||
+    input < 0 ||
+    !Number.isFinite(output) ||
+    output <= 0
+  )
+    return "refused: unknown or invalid metered price/usage estimate.";
+  let recorded: number;
+  try {
+    recorded = spent();
+  } catch {
+    return "refused: incomplete accounting; recorded API spend is unknown.";
+  }
+  if (!Number.isFinite(recorded) || recorded < 0)
+    return "refused: incomplete accounting; recorded API spend is unknown.";
+  const eur = usd * policy.fx.usd_to_eur;
+  const cap = policy.caps["anthropic-api"].daily_eur;
+  if (!Number.isFinite(eur) || !Number.isFinite(cap) || cap < 0)
+    return "refused: invalid API budget estimate.";
+  return recorded + eur > cap
+    ? `refused: over the daily cap — ${eur2(recorded)} spent today + up to ${eur2(eur)} for this call > ${eur2(cap)} (caps.anthropic-api.daily_eur).`
+    : null;
+}
+
 export async function selectLane(
   policy: RoutingPolicy,
   input: SelectInput,
@@ -132,13 +171,11 @@ export async function selectLane(
       ...(eur !== undefined ? { eur } : {}),
     };
     if (getProviderMetadata(lane).billing === "eur") {
-      const cap = policy.caps["anthropic-api"].daily_eur;
-      const spent = deps.eurSpentToday(lane);
-      const next = eur ?? 0;
-      if (spent + next > cap) {
-        skip(
-          `refused: over the daily cap — ${eur2(spent)} spent today + up to ${eur2(next)} for this call > ${eur2(cap)} (caps.anthropic-api.daily_eur).`,
-        );
+      const refusal = meteredRefusal(policy, model, input.promptTokens, outputTokens, () =>
+        deps.eurSpentToday(lane),
+      );
+      if (refusal !== null) {
+        skip(refusal);
         continue;
       }
     }

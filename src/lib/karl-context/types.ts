@@ -26,7 +26,7 @@ export const KarlContextConfigSchema = z
     alwaysExclude: z.array(z.string()).readonly().default(["Sources/**", ".git/**"]),
     // Hard cap on total bytes assembled into one context packet. Keeps token
     // load controlled (a roadmap DoD).
-    maxBytes: z.number().int().positive().default(32_768),
+    maxBytes: z.number().int().positive().max(32_768).default(32_768),
   })
   .strict();
 

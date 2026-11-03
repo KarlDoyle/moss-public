@@ -1,5 +1,6 @@
 import { PROVIDER_IDS, type ProviderId } from "../lib/providers/index.ts";
 import type { LaneTaskType } from "../lib/providers/metadata.ts";
+import { truncateUtf8, utf8Bytes } from "../lib/utf8.ts";
 import { runEdit, type SessionEditDeps } from "./edit.ts";
 
 export type { EditRoute, SessionEditDeps } from "./edit.ts";
@@ -65,6 +66,10 @@ export interface ChatGenerateParams {
   readonly task?: LaneTaskType;
   // This prompt's front-door lines, so the router can see an irreversible/external gate.
   readonly frontDoor?: string;
+  // Internal dispatch boundary: includes the final assembled provider prompt.
+  readonly maxRequestBytes?: number;
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
 }
 
 export interface ChatGenerateResult {
@@ -74,6 +79,7 @@ export interface ChatGenerateResult {
   readonly error?: string;
   // One line naming the lane and model that answered (and "stage-only" when gated).
   readonly route?: string;
+  readonly warnings?: readonly string[];
 }
 
 // A Taisce skill resolved for a slash command: the full prompt body (skill text, input and
@@ -99,6 +105,9 @@ export interface ChatSessionDeps {
   readonly err: (line: string) => void;
   // One model turn. Default wraps `runAskCommand`; tests inject a stub.
   readonly generate: (params: ChatGenerateParams) => Promise<ChatGenerateResult>;
+  readonly signal?: AbortSignal;
+  readonly batchMode?: boolean;
+  readonly onBatchFailure?: () => void;
   // Called when the loop is ready for the next line (real CLI: rl.prompt()).
   readonly prompt?: () => void;
   // For `/status`.
@@ -110,7 +119,7 @@ export interface ChatSessionDeps {
   readonly initialModel?: string;
   readonly initialProvider?: ProviderId;
   // Render the current provider route decision for `/route` (M11).
-  readonly explainRoute?: (provider: ProviderId | undefined) => Promise<string>;
+  readonly explainRoute?: (provider: ProviderId | undefined, model?: string) => Promise<string>;
 
   // ---- The Taisce session (all optional: absent → plain `moss chat` behaviour) ----
   // Banner line; defaults to the plain chat banner.
@@ -139,7 +148,7 @@ export interface ChatSessionDeps {
   // lane instead of an Ollama model, and the reasoning-model check does not apply.
   readonly isClaudeModel?: (name: string) => boolean;
   // /model with no argument: which lane and model each task type would use right now.
-  readonly routeTable?: (pinnedModel: string | undefined) => Promise<string>;
+  readonly routeTable?: (pinnedModel: string | undefined, provider?: ProviderId) => Promise<string>;
   // /check: the rendered `moss check` report (report only, never fixes anything).
   readonly check?: () => Promise<string>;
 }
@@ -178,6 +187,44 @@ function byteLength(text: string): number {
 
 function contextBytes(turns: readonly ChatTurn[]): number {
   return turns.reduce((sum, turn) => sum + byteLength(turn.content), 0);
+}
+
+async function dispatchWithinBudget(
+  session: Session,
+  params: ChatGenerateParams,
+  maxResponseBytes = session.maxBytes,
+): Promise<ChatGenerateResult> {
+  const { deps } = session;
+  if (deps.signal?.aborted) {
+    return {
+      ok: false,
+      error:
+        deps.signal.reason instanceof Error ? deps.signal.reason.message : "generation cancelled.",
+    };
+  }
+  const bytes = utf8Bytes(params.prompt) + utf8Bytes(params.system ?? "");
+  if (bytes > session.maxBytes) {
+    return {
+      ok: false,
+      error: `request is ${bytes} bytes; the combined prompt and system context limit is ${session.maxBytes} bytes. Shorten the prompt or remove loaded context before retrying.`,
+    };
+  }
+  const result = await deps.generate({
+    ...params,
+    maxRequestBytes: session.maxBytes,
+    ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
+  });
+  if (!result.ok || result.response === undefined) return result;
+  const response = truncateUtf8(result.response, maxResponseBytes);
+  if (response === result.response) return result;
+  return {
+    ...result,
+    response,
+    warnings: [
+      ...(result.warnings ?? []),
+      `Response truncated to ${utf8Bytes(response)} bytes to keep this turn within the ${session.maxBytes}-byte limit.`,
+    ],
+  };
 }
 
 // Trim the oldest turns until the transcript fits the budget, always keeping
@@ -245,6 +292,7 @@ interface Session {
   readonly deps: ChatSessionDeps;
   readonly maxBytes: number;
   readonly nextLine: () => Promise<string | undefined>;
+  failed: boolean;
 }
 
 function privacyText(deps: ChatSessionDeps): string | null {
@@ -276,6 +324,7 @@ async function runTurn(
   typed: string,
   body: string,
   task: LaneTaskType = "brief",
+  trimTranscriptToFit = false,
 ): Promise<ChatGenerateResult | null> {
   const { state, deps } = session;
   const frontDoor = deps.frontDoor !== undefined ? await deps.frontDoor(typed) : null;
@@ -296,8 +345,21 @@ async function runTurn(
       return null;
     }
   }
+  let prompt = body;
+  const requestSize = () => utf8Bytes(prompt) + utf8Bytes(header);
+  const minimumRequestBytes = utf8Bytes(synthesisePrompt([], typed)) + utf8Bytes(header);
+  while (
+    trimTranscriptToFit &&
+    minimumRequestBytes <= session.maxBytes &&
+    requestSize() > session.maxBytes &&
+    state.turns.length > 0
+  ) {
+    const oldest = state.turns.shift();
+    if (oldest?.role === "user" && state.turns[0]?.role === "assistant") state.turns.shift();
+    prompt = synthesisePrompt(state.turns, typed);
+  }
   const params: ChatGenerateParams = {
-    prompt: body,
+    prompt,
     ...(header.length > 0 ? { system: header } : {}),
     ...(state.model !== undefined ? { model: state.model } : {}),
     ...(state.provider !== undefined ? { provider: state.provider } : {}),
@@ -305,8 +367,20 @@ async function runTurn(
     ...(frontDoor !== null ? { frontDoor } : {}),
     task,
   };
-  const result = await deps.generate(params);
+  let result: ChatGenerateResult;
+  try {
+    result = await dispatchWithinBudget(
+      session,
+      params,
+      Math.max(0, session.maxBytes - utf8Bytes(typed)),
+    );
+  } catch (error) {
+    session.failed = true;
+    deps.err(error instanceof Error ? error.message : String(error));
+    return null;
+  }
   if (result.ok && result.response !== undefined) {
+    for (const warning of result.warnings ?? []) deps.err(warning);
     if (result.route !== undefined) deps.out(`· ${result.route}`);
     deps.out(result.response);
     state.turns.push({ role: "user", content: typed });
@@ -315,6 +389,7 @@ async function runTurn(
     return result;
   }
   deps.err(result.error ?? "generation failed.");
+  session.failed = true;
   return null;
 }
 
@@ -394,7 +469,8 @@ async function handleSlash(input: string, session: Session): Promise<SlashAction
     case "model":
       if (arg.length === 0) {
         deps.out(`model: ${state.model ?? "(routed per task — config/routing.yaml)"}`);
-        if (deps.routeTable !== undefined) deps.out(await deps.routeTable(state.model));
+        if (deps.routeTable !== undefined)
+          deps.out(await deps.routeTable(state.model, state.provider));
         if (deps.listModels !== undefined) {
           const pulled = await deps.listModels();
           deps.out(`pulled: ${pulled.length > 0 ? pulled.join(", ") : "none"}`);
@@ -474,18 +550,20 @@ async function handleSlash(input: string, session: Session): Promise<SlashAction
 
     case "edit": {
       const privacy = privacyText(deps);
-      await runEdit(
+      const ok = await runEdit(
         {
           edit: deps.edit,
           out: deps.out,
           err: deps.err,
-          generate: deps.generate,
+          generate: (params) => dispatchWithinBudget(session, params),
           system: buildContextHeader({ privacy, brief: undefined, frontDoor: null, files: [] }),
           model: state.model,
+          ...(state.provider !== undefined ? { provider: state.provider } : {}),
           nextLine: session.nextLine,
         },
         arg,
       );
+      if (!ok) session.failed = true;
       return "continue";
     }
 
@@ -493,7 +571,7 @@ async function handleSlash(input: string, session: Session): Promise<SlashAction
     // `/lanes` (kept, out of /help): the same per-task route table as `/model`.
     case "lanes": {
       if (deps.routeTable !== undefined) {
-        deps.out(await deps.routeTable(state.model));
+        deps.out(await deps.routeTable(state.model, state.provider));
         return "continue";
       }
       if (deps.explainRoute === undefined) {
@@ -502,7 +580,7 @@ async function handleSlash(input: string, session: Session): Promise<SlashAction
       }
       // Read-only: shows which lane Moss would dispatch to (and the fallback
       // order) for the pinned provider, or auto-route if none is pinned.
-      const rendered = await deps.explainRoute(state.provider);
+      const rendered = await deps.explainRoute(state.provider, state.model);
       deps.out(rendered);
       return "continue";
     }
@@ -528,6 +606,7 @@ async function handleSlash(input: string, session: Session): Promise<SlashAction
       deps.out(
         `context:  ~${(contextBytes(state.turns) / 1024).toFixed(1)} KiB / ${(max / 1024).toFixed(0)} KiB`,
       );
+      deps.out(`request budget: ${max.toLocaleString("en-GB")} bytes combined prompt + system`);
       if (deps.projectRoot !== undefined) {
         deps.out(`moss home: ${deps.projectRoot()}`);
       }
@@ -581,10 +660,14 @@ export async function runChatSession(deps: ChatSessionDeps): Promise<void> {
     state,
     deps,
     maxBytes: deps.maxContextBytes ?? CHAT_CONTEXT_MAX_BYTES,
+    failed: false,
     nextLine: async () => {
       const next = await iterator.next();
       return next.done === true ? undefined : next.value;
     },
+  };
+  const finish = (): void => {
+    if (session.failed && deps.batchMode === true) deps.onBatchFailure?.();
   };
 
   deps.out(
@@ -605,7 +688,10 @@ export async function runChatSession(deps: ChatSessionDeps): Promise<void> {
 
   for (;;) {
     const raw = await session.nextLine();
-    if (raw === undefined) return;
+    if (raw === undefined) {
+      finish();
+      return;
+    }
     const line = raw.trim();
 
     if (line.length === 0) {
@@ -616,13 +702,14 @@ export async function runChatSession(deps: ChatSessionDeps): Promise<void> {
     if (line.startsWith("/")) {
       if ((await handleSlash(line, session)) === "exit") {
         deps.out("bye.");
+        finish();
         return;
       }
       deps.prompt?.();
       continue;
     }
 
-    await runTurn(session, line, synthesisePrompt(state.turns, line));
+    await runTurn(session, line, synthesisePrompt(state.turns, line), "brief", true);
     deps.prompt?.();
   }
 }

@@ -122,6 +122,7 @@ export interface ExecOptions {
   // would otherwise reach the child and redirect it at the wrong repository.
   readonly unsetEnv?: readonly string[];
   readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
   readonly allowFailure?: boolean;
   // Written to the child's stdin, then closed. Used by the Taisce hooks, which read their
   // event JSON from stdin. Absent → stdin is ignored (never inherited from the terminal).
@@ -152,6 +153,8 @@ export async function run(
     all: false,
     stripFinalNewline: false,
   };
+  // Execa 10 rejects `signal`; subprocess cancellation uses `cancelSignal`.
+  if (options.signal !== undefined) execaOptions.cancelSignal = options.signal;
   if (options.cwd !== undefined) {
     execaOptions.cwd = options.cwd;
   }

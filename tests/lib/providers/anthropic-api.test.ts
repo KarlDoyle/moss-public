@@ -83,12 +83,15 @@ describe("anthropic-api probe", () => {
 describe("anthropic-api generate", () => {
   it("posts one Messages request with the model id, system and cap, and prices the call", async () => {
     const { d, post } = deps(reply);
+    const controller = new AbortController();
     const result = await createAnthropicApiProvider(d).generate?.({
       task: "ask",
       prompt: "hi",
       system: "SYS",
       model: "sonnet",
       maxTokens: 100,
+      timeoutMs: 1234,
+      signal: controller.signal,
     });
     expect(result).toMatchObject({
       providerId: "anthropic-api",
@@ -106,6 +109,13 @@ describe("anthropic-api generate", () => {
     expect(url).toBe(MESSAGES_URL);
     expect(headers["x-api-key"]).toBe(FAKE_KEY);
     expect(headers["anthropic-version"]).toBe(ANTHROPIC_VERSION);
+    const posted = post.mock.calls[0] as unknown as [
+      string,
+      Record<string, string>,
+      string,
+      { timeoutMs: number; signal: AbortSignal },
+    ];
+    expect(posted[3]).toEqual({ timeoutMs: 1234, signal: controller.signal });
     expect(JSON.parse(body)).toEqual({
       model: "claude-sonnet-5",
       max_tokens: 100,

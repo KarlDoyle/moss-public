@@ -131,7 +131,11 @@ describe("every call reaches the ledger", () => {
         },
       },
     );
-    expect(lines[1]).toMatchObject({ lane: "somewhere-else", task: "code-review", cost: "local" });
+    expect(lines[1]).toMatchObject({
+      lane: "somewhere-else",
+      task: "code-review",
+      cost: "unknown",
+    });
   });
 
   it("the claude-code probe is logged as a sub call", async () => {

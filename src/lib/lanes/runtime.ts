@@ -4,11 +4,11 @@ import { safeFetch } from "../net.ts";
 import { OLLAMA_BASE_URL } from "../ollama.ts";
 import { ensureOllama, ollamaUse } from "../ollama-lifecycle.ts";
 import { getProvider } from "../providers/index.ts";
-import { getProviderMetadata } from "../providers/metadata.ts";
+import { getProviderMetadata, listPriceUsd } from "../providers/metadata.ts";
 import type { ProviderGenerateResult, ProviderId } from "../providers/types.ts";
-import { eurSpent, localDay, readLedger, recordLaneUsage } from "./ledger.ts";
+import { accountingWarnings, eurSpent, localDay, readLedger, recordLaneUsage } from "./ledger.ts";
 import type { RoutingPolicy } from "./policy.ts";
-import type { LaneChoice, SelectDeps } from "./select.ts";
+import { type LaneChoice, meteredRefusal, type SelectDeps } from "./select.ts";
 
 export async function pulledOllamaModels(): Promise<string[]> {
   try {
@@ -59,12 +59,15 @@ export interface DispatchInput {
   readonly prompt: string;
   readonly system?: string;
   readonly command: string;
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
 }
 
 export interface DispatchDeps {
   readonly getProvider: typeof getProvider;
   readonly record: typeof recordLaneUsage;
   readonly now: () => Date;
+  readonly eurSpentToday?: (lane: ProviderId) => number;
 }
 
 export const defaultDispatchDeps: DispatchDeps = {
@@ -84,10 +87,22 @@ export async function dispatchChoice(
   if (choice.lane === null || choice.model === null || choice.settings === null) {
     throw new Error(`no lane can run task '${choice.task}' right now.`);
   }
-  const provider = deps.getProvider(choice.lane);
-  if (provider?.generate === undefined) throw new Error(`lane ${choice.lane} cannot generate.`);
   const s = choice.settings;
   const cap = s.max_tokens ?? s.num_predict;
+  if (choice.lane === "anthropic-api") {
+    const refusal = meteredRefusal(
+      policy,
+      choice.model,
+      Math.ceil(((input.system ?? "") + input.prompt).length / 4),
+      cap ?? 8192,
+      () =>
+        deps.eurSpentToday?.("anthropic-api") ??
+        eurSpent(readLedger(), "anthropic-api", localDay(deps.now())),
+    );
+    if (refusal !== null) throw new Error(refusal);
+  }
+  const provider = deps.getProvider(choice.lane);
+  if (provider?.generate === undefined) throw new Error(`lane ${choice.lane} cannot generate.`);
   const result = await provider.generate({
     task: "ask",
     prompt: input.prompt,
@@ -95,22 +110,36 @@ export async function dispatchChoice(
     ...(input.system !== undefined ? { system: input.system } : {}),
     ...(s.num_ctx !== undefined ? { numCtx: s.num_ctx } : {}),
     ...(cap !== undefined ? { maxTokens: cap } : {}),
+    ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+    ...(input.signal !== undefined ? { signal: input.signal } : {}),
   });
   if (choice.lane === "ollama") ollamaUse.used = true;
   const billing = getProviderMetadata(choice.lane).billing;
-  await deps.record({
-    ts: deps.now().toISOString(),
-    lane: choice.lane,
-    model: result.model,
-    task: choice.task,
-    command: input.command,
-    ...(result.inputTokens !== undefined ? { tokens_in: result.inputTokens } : {}),
-    ...(result.outputTokens !== undefined ? { tokens_out: result.outputTokens } : {}),
-    cost: billing,
-    ...(billing === "eur" && result.costUsd !== undefined
-      ? { eur: result.costUsd * policy.fx.usd_to_eur }
-      : {}),
-    ...(billing === "sub" && result.costUsd !== undefined ? { usd_list: result.costUsd } : {}),
-  });
-  return result;
+  const costUsd =
+    result.costUsd ??
+    (result.inputTokens !== undefined && result.outputTokens !== undefined
+      ? listPriceUsd(result.model, result.inputTokens, result.outputTokens)
+      : undefined);
+  const accounted = { ...result, ...(costUsd !== undefined ? { costUsd } : {}) };
+  const warnings = [...(result.warnings ?? []), ...accountingWarnings(accounted)];
+  try {
+    const recorded = await deps.record({
+      ts: deps.now().toISOString(),
+      lane: choice.lane,
+      model: result.model,
+      task: choice.task,
+      command: input.command,
+      ...(result.inputTokens !== undefined ? { tokens_in: result.inputTokens } : {}),
+      ...(result.outputTokens !== undefined ? { tokens_out: result.outputTokens } : {}),
+      cost: billing,
+      ...(billing === "eur" && costUsd !== undefined
+        ? { eur: costUsd * policy.fx.usd_to_eur }
+        : {}),
+      ...(billing === "sub" && costUsd !== undefined ? { usd_list: costUsd } : {}),
+    });
+    if (!recorded) warnings.push("Accounting incomplete: lane ledger write failed.");
+  } catch {
+    warnings.push("Accounting incomplete: lane ledger write failed.");
+  }
+  return { ...accounted, ...(warnings.length > 0 ? { warnings } : {}) };
 }

@@ -1,18 +1,18 @@
 // The session's lane wiring: every turn, /edit, /model and the route table go through
 // config/routing.yaml exactly like `moss run`. Kept apart from chat.ts so each stays short.
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { readFileSync } from "node:fs";
 import { gitApply } from "../lib/git.ts";
 import { renderLaneChoice } from "../lib/lanes/explain.ts";
 import { gatesIn, loadRoutingPolicy, type RoutingPolicy } from "../lib/lanes/policy.ts";
 import { defaultSelectDeps, dispatchChoice } from "../lib/lanes/runtime.ts";
 import { type LaneChoice, type SelectDeps, selectLane } from "../lib/lanes/select.ts";
-import { pinForModel } from "../lib/lanes/skill-plan.ts";
+import { requestPins } from "../lib/lanes/skill-plan.ts";
 import { assertChatModel } from "../lib/ollama.ts";
 import { ollamaUse } from "../lib/ollama-lifecycle.ts";
-import { joinInsideProject, resolveInsideRepo } from "../lib/paths.ts";
+import { resolveInsideRepo } from "../lib/paths.ts";
 import { claudeModel, LANE_TASK_TYPES, type LaneTaskType } from "../lib/providers/metadata.ts";
-import type { ProviderGenerateResult } from "../lib/providers/types.ts";
+import type { ProviderGenerateResult, ProviderId } from "../lib/providers/types.ts";
+import { utf8Bytes } from "../lib/utf8.ts";
 import type { EditRoute } from "../repl/edit.ts";
 import {
   type ChatGenerateParams,
@@ -26,7 +26,13 @@ export interface LaneSessionDeps {
   readonly dispatch: (
     policy: RoutingPolicy,
     choice: LaneChoice,
-    input: { prompt: string; system?: string; command: string },
+    input: {
+      prompt: string;
+      system?: string;
+      command: string;
+      timeoutMs?: number;
+      signal?: AbortSignal;
+    },
   ) => Promise<ProviderGenerateResult>;
 }
 
@@ -47,6 +53,7 @@ async function choose(
   text: string,
   frontDoor: string | null,
   pinned: string | undefined,
+  provider?: ProviderId,
 ): Promise<{ policy: RoutingPolicy; choice: LaneChoice }> {
   const policy = deps.policy();
   const choice = await selectLane(
@@ -55,7 +62,7 @@ async function choose(
       task,
       gates: gatesIn(policy, frontDoor),
       promptTokens: estimateTokens(text),
-      ...pinForModel(pinned),
+      ...requestPins(pinned, provider),
     },
     deps.select(),
   );
@@ -67,6 +74,15 @@ export async function routedGenerate(
   params: ChatGenerateParams,
   deps = defaultLaneSessionDeps,
 ): Promise<ChatGenerateResult> {
+  if (params.signal?.aborted) {
+    return {
+      ok: false,
+      error:
+        params.signal.reason instanceof Error
+          ? params.signal.reason.message
+          : "generation cancelled.",
+    };
+  }
   const task = params.task ?? "brief";
   // A pinned local reasoning model is refused before anything is probed, started or sent —
   // otherwise Ollama would be launched only to refuse the model.
@@ -77,13 +93,20 @@ export async function routedGenerate(
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
   }
-  const { policy, choice } = await choose(
-    deps,
-    task,
-    `${params.system ?? ""}${params.prompt}`,
-    params.frontDoor ?? null,
-    params.model,
-  );
+  let selected: Awaited<ReturnType<typeof choose>>;
+  try {
+    selected = await choose(
+      deps,
+      task,
+      `${params.system ?? ""}${params.prompt}`,
+      params.frontDoor ?? null,
+      params.model,
+      params.provider,
+    );
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  const { policy, choice } = selected;
   if (choice.lane === null || choice.model === null) {
     return {
       ok: false,
@@ -97,13 +120,34 @@ export async function routedGenerate(
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
   }
+  const maxRequestBytes = params.maxRequestBytes;
+  const requestBytes = utf8Bytes(params.prompt) + utf8Bytes(params.system ?? "");
+  if (maxRequestBytes !== undefined) {
+    if (!Number.isSafeInteger(maxRequestBytes) || maxRequestBytes <= 0) {
+      return { ok: false, error: "request byte limit must be a positive safe integer." };
+    }
+    if (requestBytes > maxRequestBytes) {
+      return {
+        ok: false,
+        error: `request is ${requestBytes} bytes; the combined prompt and system context limit is ${maxRequestBytes} bytes. Shorten the prompt or remove context before retrying.`,
+      };
+    }
+  }
   try {
     const result = await deps.dispatch(policy, choice, {
       prompt: params.prompt,
       ...(params.system !== undefined ? { system: params.system } : {}),
       command: "chat",
+      ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
+      ...(params.signal !== undefined ? { signal: params.signal } : {}),
     });
-    return { ok: true, response: result.response, model: result.model, route: routeLine(choice) };
+    return {
+      ok: true,
+      response: result.response,
+      model: result.model,
+      route: routeLine(choice),
+      ...(result.warnings !== undefined ? { warnings: result.warnings } : {}),
+    };
   } catch (error) {
     return {
       ok: false,
@@ -117,9 +161,17 @@ export async function editRoute(
   pinned: string | undefined,
   frontDoor: string | null,
   deps = defaultLaneSessionDeps,
+  provider?: ProviderId,
 ): Promise<EditRoute> {
-  const { choice } = await choose(deps, "edit", ask, frontDoor, pinned);
-  const lane = choice.lane as EditRoute["lane"];
+  const { choice } = await choose(deps, "edit", ask, frontDoor, pinned, provider);
+  if (
+    choice.lane !== null &&
+    choice.lane !== "ollama" &&
+    choice.lane !== "claude-code" &&
+    choice.lane !== "anthropic-api"
+  )
+    throw new Error(`provider '${choice.lane}' does not support /edit.`);
+  const lane = choice.lane;
   if (lane === "ollama") ollamaUse.used = true; // Aider will use it
   const why = choice.verdicts
     .map((v) => `${v.picked ? "✓" : "·"} ${v.lane}: ${v.reason}`)
@@ -151,7 +203,10 @@ export async function claudeDiff(
   files: readonly string[],
   route: EditRoute,
   deps = defaultLaneSessionDeps,
-): Promise<{ ok: boolean; diff?: string; error?: string }> {
+): Promise<{ ok: boolean; diff?: string; error?: string; warnings?: readonly string[] }> {
+  if ((route.lane !== "claude-code" && route.lane !== "anthropic-api") || route.model === null)
+    return { ok: false, error: "No explicit hosted edit route; diff generation refused." };
+  const pins = requestPins(route.model, route.lane);
   const sources = files.map((f) => {
     const text = readFileSync(resolveInsideRepo(repo, f), "utf8");
     if (text.length > MAX_FILE_BYTES)
@@ -174,30 +229,41 @@ export async function claudeDiff(
     {
       task: "edit",
       promptTokens: estimateTokens(prompt),
-      ...(route.lane !== null ? { pinLane: route.lane } : {}),
-      ...(route.model !== null ? { pinModel: route.model } : {}),
+      ...pins,
     },
     deps.select(),
   );
+  if (pinned.lane !== route.lane || pinned.model !== route.model)
+    return {
+      ok: false,
+      error: `Pinned edit route unavailable: ${pinned.verdicts.map((v) => v.reason).join("; ")}`,
+    };
   try {
     const result = await deps.dispatch(policy, pinned, { prompt, command: "chat" });
-    return { ok: true, diff: extractDiff(result.response) };
+    return {
+      ok: true,
+      diff: extractDiff(result.response),
+      ...(result.warnings !== undefined ? { warnings: result.warnings } : {}),
+    };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 }
 
-export async function applyPatch(repo: string, diff: string, check: boolean) {
-  const file = joinInsideProject("output", "edits", `edit-${Date.now()}.diff`);
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, diff);
-  return gitApply(repo, file, check);
+export async function applyPatch(
+  repo: string,
+  diff: string,
+  check: boolean,
+  files: readonly string[],
+) {
+  return gitApply(repo, diff, check, files);
 }
 
 // /model with no argument: the lane and model each task would take right now.
 export async function routeTable(
   pinned: string | undefined,
   deps = defaultLaneSessionDeps,
+  provider?: ProviderId,
 ): Promise<string> {
   const policy = deps.policy();
   const select = deps.select();
@@ -205,7 +271,7 @@ export async function routeTable(
   for (const task of LANE_TASK_TYPES) {
     const c = await selectLane(
       policy,
-      { task, promptTokens: 1_000, ...pinForModel(pinned) },
+      { task, promptTokens: 1_000, ...requestPins(pinned, provider) },
       select,
     );
     rows.push(

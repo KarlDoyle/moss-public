@@ -130,7 +130,7 @@ describe("baseline: /edit dry-run stops at go?", () => {
     expect(s.aider.mock.calls[0]?.[1]).toMatchObject({ dryRun: true, files: ["a.py"] });
     const text = s.out.join("\n");
     expect(text).toContain("go? [y/N]");
-    expect(text).toContain("not applied. Nothing was written.");
+    expect(text).toContain("not applied. No target patch was applied.");
   });
 });
 

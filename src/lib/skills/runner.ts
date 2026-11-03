@@ -6,7 +6,11 @@ import {
   type RepoSnapshot,
 } from "../git.ts";
 import type { OllamaGenerateOptions, OllamaGenerateResult } from "../providers/ollama.ts";
-import { routeAndGenerate } from "../providers/router.ts";
+import {
+  defaultRouterDependencies,
+  type RouterDependencies,
+  routeAndGenerate,
+} from "../providers/router.ts";
 import { bestModel, loadRegistry as defaultLoadRegistry, type Registry } from "../registry.ts";
 import {
   assertGitRepo as defaultAssertGitRepo,
@@ -46,27 +50,30 @@ export interface SkillRunDependencies {
   readonly generate: (options: OllamaGenerateOptions) => Promise<OllamaGenerateResult>;
 }
 
-// Default `generate` routes through the M3 router (task='code-review').
-// The runner's `deps.generate` signature stays
-// `OllamaGenerateOptions -> OllamaGenerateResult` for backwards-compat
-// with M2 test stubs; the router-shaped translation lives here so
-// tests that inject a stub `generate` are unaffected. The router is
-// what decides which provider serves the request; in M3-T02 only
-// Ollama is implemented so the dispatch lands on Ollama every time.
-async function defaultGenerateViaRouter(
+// Bundled reviews enforce local-only/no-fallback before any hosted probe. The
+// injectable Ollama-shaped dependency remains for controlled fixture tests.
+export async function defaultGenerateViaRouter(
   options: OllamaGenerateOptions,
+  routerDeps: RouterDependencies = defaultRouterDependencies,
 ): Promise<OllamaGenerateResult> {
-  const { result } = await routeAndGenerate("code-review", {
-    task: "code-review",
-    prompt: options.prompt,
-    model: options.model,
-    ...(options.system !== undefined ? { system: options.system } : {}),
-    ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
-    ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
-  });
+  const { result } = await routeAndGenerate(
+    "code-review",
+    {
+      task: "code-review",
+      prompt: options.prompt,
+      model: options.model,
+      provider: "ollama",
+      localOnly: true,
+      ...(options.system !== undefined ? { system: options.system } : {}),
+      ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
+      ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+    },
+    { ...routerDeps, listProviders: () => ["ollama"] },
+  );
   return {
     model: result.model,
     response: result.response,
+    ...(result.warnings !== undefined ? { warnings: result.warnings } : {}),
     providerId: result.providerId,
     ...(result.durationMs !== undefined ? { durationMs: result.durationMs } : {}),
     ...(result.inputTokens !== undefined ? { inputTokens: result.inputTokens } : {}),
@@ -106,6 +113,7 @@ export interface SkillRunResult {
   readonly diffSource: DiffResult["source"];
   readonly diffSummary: string;
   readonly response: string;
+  readonly warnings?: readonly string[];
   readonly durationMs?: number;
   readonly inputTokens?: number;
   readonly outputTokens?: number;
@@ -230,6 +238,7 @@ export async function runSkill(
     diffSource: diff.source,
     diffSummary: diff.summary,
     response: generation.response,
+    ...(generation.warnings !== undefined ? { warnings: generation.warnings } : {}),
     ...(generation.durationMs !== undefined ? { durationMs: generation.durationMs } : {}),
     ...(generation.inputTokens !== undefined ? { inputTokens: generation.inputTokens } : {}),
     ...(generation.outputTokens !== undefined ? { outputTokens: generation.outputTokens } : {}),

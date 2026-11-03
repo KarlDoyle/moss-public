@@ -8,6 +8,8 @@
 //   stage-only (a gate)  → the plan and diff are shown and nothing is applied, no "go?".
 //
 // Never commits. Every side effect is an injected dependency (wired in src/commands/chat.ts).
+import { requestPins } from "../lib/lanes/skill-plan.ts";
+import type { ProviderId } from "../lib/providers/types.ts";
 import { claudeLane, localLane } from "./edit-lanes.ts";
 import type { ChatGenerateParams, ChatGenerateResult } from "./session.ts";
 
@@ -45,19 +47,24 @@ export interface SessionEditDeps {
   readonly parsePlan: (text: string) => { files: string; plan: string };
   readonly pickFiles: (text: string, tracked: readonly string[]) => string[];
   // The routed edit lane for this ask (absent → the local lane, as before the router).
-  readonly route?: (ask: string, pinnedModel: string | undefined) => Promise<EditRoute>;
+  readonly route?: (
+    ask: string,
+    pinnedModel: string | undefined,
+    provider?: ProviderId,
+  ) => Promise<EditRoute>;
   // Claude lane: a unified diff implementing the plan on exactly these files.
   readonly claudeDiff?: (
     repo: string,
     plan: string,
     files: readonly string[],
     route: EditRoute,
-  ) => Promise<{ ok: boolean; diff?: string; error?: string }>;
+  ) => Promise<{ ok: boolean; diff?: string; error?: string; warnings?: readonly string[] }>;
   // `git apply` (check=true: `--check`, touches nothing).
   readonly applyPatch?: (
     repo: string,
     diff: string,
     check: boolean,
+    files: readonly string[],
   ) => Promise<{ ok: boolean; output: string }>;
 }
 
@@ -67,6 +74,7 @@ export interface EditContext {
   readonly err: (line: string) => void;
   readonly generate: (params: ChatGenerateParams) => Promise<ChatGenerateResult>;
   readonly system: string; // the privacy header, sent with the planning turn
+  readonly provider?: ProviderId;
   readonly model: string | undefined; // the session pin
   readonly nextLine: () => Promise<string | undefined>;
 }
@@ -78,26 +86,49 @@ const LOCAL: EditRoute = {
   summary: "local lane (Aider)",
 };
 
-export async function runEdit(ctx: EditContext, ask: string): Promise<void> {
+// Explicit outcome: warnings and deliberate no-apply decisions are successful.
+// Keep unexpected dependency failures usable in an interactive session too.
+export async function runEdit(ctx: EditContext, ask: string): Promise<boolean> {
+  try {
+    return await performEdit(ctx, ask);
+  } catch (error) {
+    ctx.err(`/edit: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
+}
+
+async function performEdit(ctx: EditContext, ask: string): Promise<boolean> {
   const edit = ctx.edit;
   if (edit === undefined) {
     ctx.err("/edit is not available in this session.");
-    return;
+    return false;
   }
   if (ask.length === 0) {
     ctx.err("usage: /edit <what to change>");
-    return;
+    return false;
   }
   const repo = await edit.resolveRepo();
   if (repo === null) {
     ctx.err("/edit: no git repo here and no Taisce checkout to fall back to.");
-    return;
+    return false;
   }
   const tracked = await edit.trackedFiles(repo);
-  const route = edit.route !== undefined ? await edit.route(ask, ctx.model) : LOCAL;
+  let route: EditRoute;
+  try {
+    const pins = requestPins(ctx.model, ctx.provider);
+    route = edit.route !== undefined ? await edit.route(ask, ctx.model, ctx.provider) : LOCAL;
+    if (route.lane !== null && pins.pinLane !== undefined && route.lane !== pins.pinLane) {
+      throw new Error("edit route cannot honor the requested provider/model pin.");
+    }
+    if (route.lane !== null && pins.pinModel !== undefined && route.model !== pins.pinModel)
+      throw new Error("edit route cannot honor the requested model pin.");
+  } catch (error) {
+    ctx.err(`/edit: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
   if (route.lane === null) {
     ctx.err(`/edit: no lane can edit right now — ${route.summary}`);
-    return;
+    return false;
   }
   ctx.out(`· edit in ${repo} — ${route.summary}`);
 
@@ -106,12 +137,14 @@ export async function runEdit(ctx: EditContext, ask: string): Promise<void> {
     prompt: edit.buildPlanPrompt(ask, tracked),
     task: "edit",
     ...(ctx.system.length > 0 ? { system: ctx.system } : {}),
-    ...(ctx.model !== undefined ? { model: ctx.model } : {}),
+    ...(route.model !== null ? { model: route.model } : {}),
+    provider: route.lane,
   });
   if (!planned.ok || planned.response === undefined) {
     ctx.err(planned.error ?? "/edit: planning failed.");
-    return;
+    return false;
   }
+  for (const warning of planned.warnings ?? []) ctx.err(warning);
   const { files: namedFiles, plan } = edit.parsePlan(planned.response);
   const files = edit.pickFiles(`${namedFiles}\n${ask}`, tracked);
   ctx.out("plan:");
@@ -119,14 +152,14 @@ export async function runEdit(ctx: EditContext, ask: string): Promise<void> {
   ctx.out(`  ${plan}`);
   if (files.length === 0) {
     ctx.err("/edit: the plan named no file tracked in this repo. Name the file in your ask.");
-    return;
+    return false;
   }
   try {
     edit.checkFiles(repo, files);
   } catch (error) {
     ctx.err(error instanceof Error ? error.message : String(error));
-    return;
+    return false;
   }
-  if (route.lane === "ollama") await localLane(ctx, edit, repo, plan, files, route);
-  else await claudeLane(ctx, edit, repo, plan, files, route);
+  if (route.lane === "ollama") return localLane(ctx, edit, repo, plan, files, route);
+  return claudeLane(ctx, edit, repo, plan, files, route);
 }
