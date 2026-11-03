@@ -148,6 +148,9 @@ describe("CLI integration smoke (no real Ollama, no cloud)", () => {
     expect(globalBody).toEqual(ownBody);
     expect(globalBody.selectedProvider).toBe("cursor-manual");
     expect(globalBody.selectedModel).toBe("packet-fixture");
+  });
+
+  it("global and standalone previews agree for a literal --explain prompt", () => {
     const literalGlobal = runCli(
       [
         "--json",
@@ -179,6 +182,9 @@ describe("CLI integration smoke (no real Ollama, no cloud)", () => {
     );
     const { probedAt: _literalOwnTime, ...literalOwnBody } = JSON.parse(literalOwn.stdout ?? "{}");
     expect(literalGlobalBody).toEqual(literalOwnBody);
+  });
+
+  it("both preview forms reject malformed provider values", () => {
     for (const argv of [
       ["--explain", "ask", "--provider=ollama=bad"],
       ["ask", "--explain", "--provider=ollama=bad"],
