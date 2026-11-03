@@ -51,6 +51,7 @@ export interface ClaudeCodeDeps {
     args: readonly string[],
     input: string,
     timeoutMs: number,
+    signal?: AbortSignal,
   ) => Promise<{ exitCode: number; stdout: string; stderr: string }>;
   readonly readCache: (
     key: string,
@@ -70,8 +71,14 @@ function cacheFile(): string {
 
 export const defaultClaudeCodeDeps: ClaudeCodeDeps = {
   onPath: () => binaryOnPath("claude", defaultDetectionEnv),
-  exec: (args, input, timeoutMs) =>
-    run("claude", args, { cwd: tmpdir(), input, timeoutMs, allowFailure: true }),
+  exec: (args, input, timeoutMs, signal) =>
+    run("claude", args, {
+      cwd: tmpdir(),
+      input,
+      timeoutMs,
+      allowFailure: true,
+      ...(signal !== undefined ? { signal } : {}),
+    }),
   readCache: (key) => {
     try {
       const all = JSON.parse(readFileSync(cacheFile(), "utf8")) as Record<string, never>;
@@ -103,7 +110,7 @@ async function liveProbe(
     60_000,
   );
   const parsed = parseClaudeJson(out.stdout);
-  if (parsed !== null && !parsed.isError && deps.record !== undefined) {
+  if (out.exitCode === 0 && parsed !== null && !parsed.isError && deps.record !== undefined) {
     await deps.record({
       ts: new Date().toISOString(),
       lane: "claude-code",
@@ -116,13 +123,16 @@ async function liveProbe(
       ...(parsed.costUsd !== undefined ? { usd_list: parsed.costUsd } : {}),
     });
   }
-  if (parsed !== null && !parsed.isError) {
+  if (out.exitCode === 0 && parsed !== null && !parsed.isError) {
     return {
       status: "available",
       reason: "claude is logged in (1-token probe answered); billed to the subscription.",
     };
   }
-  const said = (parsed?.result || out.stderr || out.stdout).trim().split("\n")[0] ?? "";
+  const said =
+    ((out.exitCode === 0 ? parsed?.result : undefined) || out.stderr || out.stdout)
+      .trim()
+      .split("\n")[0] ?? "";
   if (/not logged in|\/login|authenticat/i.test(said)) {
     return {
       status: "unauthenticated",
@@ -169,11 +179,17 @@ export function createClaudeCodeProvider(deps: ClaudeCodeDeps = defaultClaudeCod
       buildClaudeArgs(model, options.system),
       options.prompt,
       options.timeoutMs ?? GENERATE_TIMEOUT_MS,
+      options.signal,
     );
     const parsed = parseClaudeJson(out.stdout);
+    if (out.exitCode !== 0) {
+      throw new ClaudeCodeDispatchError(
+        `process exited ${out.exitCode}${out.stderr.trim() ? `: ${out.stderr.trim().slice(0, 200)}` : ""}`,
+      );
+    }
     if (parsed === null) {
       throw new ClaudeCodeDispatchError(
-        `unreadable output (exit ${out.exitCode}): ${out.stderr.trim().slice(0, 200)}`,
+        `unreadable output or invalid result: ${out.stderr.trim().slice(0, 200)}`,
       );
     }
     if (parsed.isError) throw new ClaudeCodeDispatchError(parsed.result || `exit ${out.exitCode}`);

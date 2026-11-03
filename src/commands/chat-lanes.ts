@@ -26,7 +26,13 @@ export interface LaneSessionDeps {
   readonly dispatch: (
     policy: RoutingPolicy,
     choice: LaneChoice,
-    input: { prompt: string; system?: string; command: string },
+    input: {
+      prompt: string;
+      system?: string;
+      command: string;
+      timeoutMs?: number;
+      signal?: AbortSignal;
+    },
   ) => Promise<ProviderGenerateResult>;
 }
 
@@ -68,6 +74,15 @@ export async function routedGenerate(
   params: ChatGenerateParams,
   deps = defaultLaneSessionDeps,
 ): Promise<ChatGenerateResult> {
+  if (params.signal?.aborted) {
+    return {
+      ok: false,
+      error:
+        params.signal.reason instanceof Error
+          ? params.signal.reason.message
+          : "generation cancelled.",
+    };
+  }
   const task = params.task ?? "brief";
   // A pinned local reasoning model is refused before anything is probed, started or sent —
   // otherwise Ollama would be launched only to refuse the model.
@@ -123,6 +138,8 @@ export async function routedGenerate(
       prompt: params.prompt,
       ...(params.system !== undefined ? { system: params.system } : {}),
       command: "chat",
+      ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
+      ...(params.signal !== undefined ? { signal: params.signal } : {}),
     });
     return {
       ok: true,

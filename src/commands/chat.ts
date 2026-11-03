@@ -102,6 +102,8 @@ async function legacyGenerate(params: ChatGenerateParams): Promise<ChatGenerateR
     ...(request.provider !== undefined ? { provider: request.provider } : {}),
     ...(request.contextProfile !== undefined ? { karlContextProfile: request.contextProfile } : {}),
     ...(request.maxRequestBytes !== undefined ? { maxRequestBytes: request.maxRequestBytes } : {}),
+    ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {}),
+    ...(request.signal !== undefined ? { signal: request.signal } : {}),
   };
 
   const result = await runAskCommand(options);
@@ -250,6 +252,8 @@ export async function startSession(
     output: process.stdout,
     prompt: "moss › ",
   });
+  const controller = new AbortController();
+  let terminationCode: number | undefined;
   // Piped input (a script, a test) can reach EOF while a model turn is still running;
   // prompting a closed interface throws, so the prompt is skipped once input has ended.
   let closed = false;
@@ -266,6 +270,11 @@ export async function startSession(
     },
     projectRoot: () => getProjectRoot(),
     generate: chatGenerate,
+    signal: controller.signal,
+    batchMode: process.stdin.isTTY !== true,
+    onBatchFailure: () => {
+      process.exitCode = 1;
+    },
     explainRoute: chatExplainRoute,
     ...buildTaisceSessionDeps(),
     ...(commandOpts.model !== undefined ? { initialModel: commandOpts.model } : {}),
@@ -282,17 +291,25 @@ export async function startSession(
     const result = await turnOffOllama();
     process.stdout.write(`· ${result.message}\n`);
   };
-  const onSignal = (): void => {
-    void endOllama().finally(() => process.exit(0));
+  const onSignal = (signal: NodeJS.Signals): void => {
+    terminationCode = 128 + (signal === "SIGINT" ? 2 : signal === "SIGHUP" ? 1 : 15);
+    controller.abort(new Error(`chat interrupted by ${signal}`));
+    rl.close();
   };
-  process.once("SIGHUP", onSignal);
-  process.once("SIGTERM", onSignal);
+  const onSigint = (): void => onSignal("SIGINT");
+  const onSighup = (): void => onSignal("SIGHUP");
+  const onSigterm = (): void => onSignal("SIGTERM");
+  process.once("SIGINT", onSigint);
+  process.once("SIGHUP", onSighup);
+  process.once("SIGTERM", onSigterm);
   try {
     await runChatSession(deps);
+    if (terminationCode !== undefined) process.exitCode = terminationCode;
   } finally {
     rl.close();
-    process.off("SIGHUP", onSignal);
-    process.off("SIGTERM", onSignal);
+    process.off("SIGINT", onSigint);
+    process.off("SIGHUP", onSighup);
+    process.off("SIGTERM", onSigterm);
     await endOllama();
   }
 }

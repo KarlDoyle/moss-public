@@ -356,6 +356,7 @@ function laneOptions(
     ...(request.system !== undefined ? { system: request.system } : {}),
     ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
     ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {}),
+    ...(request.signal !== undefined ? { signal: request.signal } : {}),
     ...(id === "anthropic-api"
       ? { maxTokens: request.maxTokens ?? settings?.max_tokens ?? settings?.num_predict ?? 8192 }
       : request.maxTokens !== undefined
@@ -452,6 +453,11 @@ export async function routeAndGenerate(
   readonly result: ProviderGenerateResult;
   readonly explanation: ProviderRouteExplanation;
 }> {
+  if (options.signal?.aborted) {
+    throw options.signal.reason instanceof Error
+      ? options.signal.reason
+      : new Error("provider request was cancelled");
+  }
   const resolved = await requestRoute(task, deps, options);
   const { explanation } = resolved;
   if (explanation.selectedProvider === null) {
@@ -518,6 +524,9 @@ export async function routeAndGenerate(
       const warnings = [...(result.warnings ?? []), ...accountingWarnings(result)];
       return { result: { ...result, ...(warnings.length > 0 ? { warnings } : {}) }, explanation };
     } catch (error) {
+      if (effective.signal?.aborted) {
+        throw effective.signal.reason instanceof Error ? effective.signal.reason : error;
+      }
       if (classifyGenerateFailure(error) === "terminal") {
         throw error;
       }

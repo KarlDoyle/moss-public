@@ -134,6 +134,8 @@ export interface AskCommandOptions {
   readonly usageCommand?: UsageCommand;
   // Combined UTF-8 byte budget for the final prompt and system context.
   readonly maxRequestBytes?: number;
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
 }
 
 export interface AskCommandResult {
@@ -362,6 +364,8 @@ export async function runAskCommand(options: AskCommandOptions): Promise<AskComm
     ...(options.provider !== undefined ? { provider: options.provider } : {}),
     ...(options.system !== undefined ? { system: options.system } : {}),
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
+    ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+    ...(options.signal !== undefined ? { signal: options.signal } : {}),
     maxRequestBytes,
   };
   // Preview uses the same resolved context, model and request constraints.

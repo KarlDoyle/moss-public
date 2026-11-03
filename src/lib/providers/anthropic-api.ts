@@ -35,13 +35,20 @@ export interface AnthropicApiDeps {
     url: string,
     headers: Record<string, string>,
     body: string,
+    options?: { timeoutMs?: number; signal?: AbortSignal },
   ) => Promise<FetchResult>;
 }
 
 export const defaultAnthropicApiDeps: AnthropicApiDeps = {
   keychain: defaultKeychainDeps,
-  post: (url, headers, body) =>
-    safeFetch(url, { method: "POST", headers, body, timeoutMs: TIMEOUT_MS }),
+  post: (url, headers, body, options) =>
+    safeFetch(url, {
+      method: "POST",
+      headers,
+      body,
+      timeoutMs: options?.timeoutMs ?? TIMEOUT_MS,
+      ...(options?.signal !== undefined ? { signal: options.signal } : {}),
+    }),
 };
 
 interface MessagesResponse {
@@ -103,6 +110,10 @@ export function createAnthropicApiProvider(
           "anthropic-version": ANTHROPIC_VERSION,
         },
         body,
+        {
+          timeoutMs: options.timeoutMs ?? TIMEOUT_MS,
+          ...(options.signal !== undefined ? { signal: options.signal } : {}),
+        },
       );
     } catch (error) {
       if (error instanceof NetworkBoundaryError) throw error;

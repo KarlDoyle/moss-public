@@ -58,7 +58,7 @@ describe("parseClaudeJson", () => {
       costUsd: 0.0015,
     });
     expect(parseClaudeJson("not json")).toBeNull();
-    expect(parseClaudeJson('{"is_error":true}')).toEqual({ isError: true, result: "" });
+    expect(parseClaudeJson('{"is_error":true}')).toBeNull();
   });
 });
 
@@ -100,6 +100,18 @@ describe("claude-code probe", () => {
     const probe = await createClaudeCodeProvider(d).probe(now);
     expect(probe).toMatchObject({ status: "unavailable", reason: "claude probe failed: boom." });
   });
+
+  it("does not mark a success-shaped response available after a failed process", async () => {
+    const exec = vi.fn(async () => ({
+      exitCode: 17,
+      stdout: ok("misleading success"),
+      stderr: "fixture failure",
+    }));
+    const { d } = deps(ok("misleading success"), { exec });
+    const probe = await createClaudeCodeProvider(d).probe(now);
+    expect(probe.status).toBe("unavailable");
+    expect(exec).toHaveBeenCalledOnce();
+  });
 });
 
 describe("claude-code generate", () => {
@@ -132,5 +144,32 @@ describe("claude-code generate", () => {
     const error = await p2?.catch((e: unknown) => e);
     expect(String(error)).toContain("unreadable output");
     expect(classifyGenerateFailure(error)).toBe("retryable");
+  });
+
+  it("rejects a success-shaped JSON result when the subprocess exits nonzero", async () => {
+    const { d } = deps(ok("must not be accepted"), {
+      exec: vi.fn(async () => ({
+        exitCode: 17,
+        stdout: ok("must not be accepted"),
+        stderr: "fixture failure",
+      })),
+    });
+    await expect(
+      createClaudeCodeProvider(d).generate?.({ task: "ask", prompt: "fixture" }),
+    ).rejects.toThrow(/process exited 17/);
+  });
+
+  it("passes the requested timeout and cancellation signal to the subprocess seam", async () => {
+    const controller = new AbortController();
+    const { d, exec } = deps(ok("answer"));
+    await createClaudeCodeProvider(d).generate?.({
+      task: "ask",
+      prompt: "fixture",
+      timeoutMs: 1234,
+      signal: controller.signal,
+    });
+    const call = exec.mock.calls[0] as unknown as [readonly string[], string, number, AbortSignal?];
+    expect(call[2]).toBe(1234);
+    expect(call[3]).toBe(controller.signal);
   });
 });

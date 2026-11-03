@@ -97,6 +97,17 @@ describe("/edit on a Claude lane", () => {
     expect(s.out.join("\n")).toContain("not applied");
   });
 
+  it("reports failed patch application without claiming no partial changes", async () => {
+    const s = setup(claude, ["y"], {
+      applyPatch: async (_repo, _diff, check) =>
+        check ? { ok: true, output: "" } : { ok: false, output: "fixture apply failure" },
+    });
+    await runEdit(s.ctx, "set x in a.py");
+    expect(s.err.join("\n")).toContain("git apply failed: fixture apply failure");
+    expect(s.err.join("\n")).toContain("Inspect git diff and git status");
+    expect(s.out.join("\n")).not.toContain("Applied exactly the diff shown above");
+  });
+
   it("refuses a diff that strays outside the plan, or does not apply cleanly, or is empty", async () => {
     const stray = setup(claude, ["y"], {
       claudeDiff: async () => ({ ok: true, diff: `${DIFF}${DIFF.replaceAll("a.py", "b.py")}` }),
@@ -160,6 +171,35 @@ describe("/edit on the local lane", () => {
     ]);
     expect(s.out.join("\n")).toContain("architect llama3.1:latest → editor qwen2.5-coder:7b");
     expect(s.out.join("\n")).toContain("second generation");
+  });
+
+  it("reports a failed Aider apply as possibly partial and skips normal completion", async () => {
+    const aider = vi.fn(async (_repo: string, options: { dryRun: boolean }) =>
+      options.dryRun
+        ? { exitCode: 0, output: "dry" }
+        : { exitCode: 23, output: "partial edit before failure" },
+    );
+    const diffStat = vi.fn(async () => "unexpected normal summary");
+    const s = setup(local, ["go"], { aider, diffStat });
+    await runEdit(s.ctx, "set x in a.py");
+    expect(s.err.join("\n")).toContain("exited 23 during apply");
+    expect(s.err.join("\n")).toContain("inspect git diff and git status");
+    expect(s.out.join("\n")).not.toContain("Not committed. Read `git diff`");
+    expect(diffStat).not.toHaveBeenCalled();
+  });
+
+  it("reports a thrown Aider apply as possibly partial", async () => {
+    const aider = vi.fn(async (_repo: string, options: { dryRun: boolean }) => {
+      if (options.dryRun) return { exitCode: 0, output: "dry" };
+      throw new Error("controlled timeout");
+    });
+    const diffStat = vi.fn(async () => "unexpected normal summary");
+    const s = setup(local, ["go"], { aider, diffStat });
+    await runEdit(s.ctx, "set x in a.py");
+    expect(s.err.join("\n")).toContain("aider apply failed (controlled timeout)");
+    expect(s.err.join("\n")).toContain("inspect git diff and git status");
+    expect(s.out.join("\n")).not.toContain("Not committed. Read `git diff`");
+    expect(diffStat).not.toHaveBeenCalled();
   });
 
   it("stage-only stops after the dry run", async () => {

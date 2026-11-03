@@ -30,6 +30,22 @@ async function finish(
   );
 }
 
+async function finishAfterApply(
+  ctx: EditContext,
+  edit: SessionEditDeps,
+  repo: string,
+  second: boolean,
+): Promise<void> {
+  try {
+    await finish(ctx, edit, repo, second);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    ctx.err(
+      `/edit: changes were applied, but Moss could not read the diff summary (${detail}). Inspect git diff and git status before continuing.`,
+    );
+  }
+}
+
 export async function claudeLane(
   ctx: EditContext,
   edit: SessionEditDeps,
@@ -80,12 +96,23 @@ export async function claudeLane(
     return;
   }
   if (!(await askGo(ctx))) return;
-  const applied = await edit.applyPatch(repo, made.diff, false, files);
-  if (!applied.ok) {
-    ctx.err(`/edit: git apply failed: ${applied.output.trim()}`);
+  let applied: { ok: boolean; output: string };
+  try {
+    applied = await edit.applyPatch(repo, made.diff, false, files);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    ctx.err(
+      `/edit: git apply raised an error (${detail}); inspect git diff and git status because Moss cannot confirm whether changes were partial.`,
+    );
     return;
   }
-  await finish(ctx, edit, repo, false);
+  if (!applied.ok) {
+    ctx.err(
+      `/edit: git apply failed: ${applied.output.trim()}. Inspect git diff and git status because Moss cannot confirm whether changes were partial.`,
+    );
+    return;
+  }
+  await finishAfterApply(ctx, edit, repo, false);
 }
 
 export async function localLane(
@@ -119,7 +146,22 @@ export async function localLane(
   }
   if (!(await askGo(ctx))) return;
   ctx.out(`· aider applying with ${who} (no commit)…`);
-  const applied = await edit.aider(repo, { ...opts, dryRun: false });
+  let applied: { exitCode: number; output: string };
+  try {
+    applied = await edit.aider(repo, { ...opts, dryRun: false });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    ctx.err(
+      `/edit: aider apply failed (${detail}). Moss cannot determine whether it changed some files; inspect git diff and git status before continuing. No completion is reported.`,
+    );
+    return;
+  }
   ctx.out(applied.output.length > 0 ? applied.output : "(aider printed nothing)");
-  await finish(ctx, edit, repo, true);
+  if (applied.exitCode !== 0) {
+    ctx.err(
+      `/edit: aider exited ${applied.exitCode} during apply. Moss cannot determine whether it changed some files; inspect git diff and git status before continuing. No completion is reported.`,
+    );
+    return;
+  }
+  await finishAfterApply(ctx, edit, repo, true);
 }

@@ -39,6 +39,16 @@ describe("routedGenerate — a session turn on the routed lane", () => {
     expect(dispatch.mock.calls[0]?.[2]).toEqual({ prompt: "hi", system: "RULES", command: "chat" });
   });
 
+  it("forwards timeout and cancellation to the selected task-policy provider", async () => {
+    const { d, dispatch } = deps({ ollama: "available" });
+    const controller = new AbortController();
+    await routedGenerate({ prompt: "fixture", timeoutMs: 1234, signal: controller.signal }, d);
+    expect(dispatch.mock.calls[0]?.[2]).toMatchObject({
+      timeoutMs: 1234,
+      signal: controller.signal,
+    });
+  });
+
   it("a reasoning skill goes to Claude; a gated prompt is stage-only", async () => {
     const { d } = deps({ "claude-code": "available" });
     expect((await routedGenerate({ prompt: "x", task: "reason" }, d)).route).toBe(
