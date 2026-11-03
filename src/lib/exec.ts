@@ -153,7 +153,8 @@ export async function run(
     all: false,
     stripFinalNewline: false,
   };
-  if (options.signal !== undefined) execaOptions.signal = options.signal;
+  // Execa 10 rejects `signal`; subprocess cancellation uses `cancelSignal`.
+  if (options.signal !== undefined) execaOptions.cancelSignal = options.signal;
   if (options.cwd !== undefined) {
     execaOptions.cwd = options.cwd;
   }

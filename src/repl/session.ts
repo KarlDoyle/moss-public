@@ -550,7 +550,7 @@ async function handleSlash(input: string, session: Session): Promise<SlashAction
 
     case "edit": {
       const privacy = privacyText(deps);
-      await runEdit(
+      const ok = await runEdit(
         {
           edit: deps.edit,
           out: deps.out,
@@ -563,6 +563,7 @@ async function handleSlash(input: string, session: Session): Promise<SlashAction
         },
         arg,
       );
+      if (!ok) session.failed = true;
       return "continue";
     }
 
