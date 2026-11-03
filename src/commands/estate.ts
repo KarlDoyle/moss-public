@@ -9,7 +9,7 @@
 // and forwards everything else here. Called directly, these two print that and exit 1.
 import type { Command } from "commander";
 import { runDetached } from "../lib/exec.ts";
-import { isReasoningModel, resolveCoderModel, resolveNumCtx } from "../lib/ollama.ts";
+import { isReasoningModel, resolveNumCtx } from "../lib/ollama.ts";
 import {
   type DoctorDependencies,
   type DoctorReport,
@@ -87,6 +87,7 @@ export function shellOnlyMessage(sub: "api" | "sub"): string {
 export interface LocalDeps {
   readonly report: () => Promise<DoctorReport>;
   readonly startOllama: (numCtx: number) => void;
+  /** @deprecated Ignored; Aider support is disabled and never probed. */
   readonly aiderInstalled: () => Promise<boolean>;
   readonly wait: (ms: number) => Promise<void>;
   readonly env: NodeJS.ProcessEnv;
@@ -95,23 +96,15 @@ export interface LocalDeps {
 export const defaultLocalDeps: LocalDeps = {
   report: () => gatherDiagnostics(defaultDoctorDependencies),
   // OLLAMA_CONTEXT_LENGTH sets the daemon's window. moss sends num_ctx on every call anyway
-  // (src/lib/ollama.ts); this covers Aider and anything else talking to the same daemon.
+  // (src/lib/ollama.ts); this also covers other clients of the same daemon.
   startOllama: (numCtx) =>
     runDetached("ollama", ["serve"], { env: { OLLAMA_CONTEXT_LENGTH: String(numCtx) } }),
-  aiderInstalled: async () => {
-    const { run } = await import("../lib/exec.ts");
-    try {
-      const result = await run("aider", ["--version"], { allowFailure: true, timeoutMs: 30_000 });
-      return result.exitCode === 0;
-    } catch {
-      return false;
-    }
-  },
+  aiderInstalled: async () => false,
   wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   env: process.env,
 };
 
-// Tier 3: make sure Ollama is up, then say whether the session can chat and edit. Never
+// Tier 3: make sure Ollama is up, then check local chat readiness. Never
 // installs a package or pulls a model — it names the command and stops.
 export async function runLocal(
   out: (line: string) => void,
@@ -149,7 +142,6 @@ export async function runLocal(
 
   const models = report.ollama.models.map((m) => m.name);
   const chat = models.filter((m) => !isReasoningModel(m));
-  const coder = resolveCoderModel(deps.env);
   let ok = true;
   if (chat.length === 0) {
     err(
@@ -159,22 +151,9 @@ export async function runLocal(
   } else {
     out(`chat model:  ${chat.join(", ")} (reasoning models are never used for chat)`);
   }
-  if (models.includes(coder) || models.includes(`${coder}:latest`)) {
-    out(`coder model: ${coder} — /edit is ready`);
-  } else {
-    err(
-      `moss local: coder model ${coder} is not pulled; /edit needs it. Run 'ollama pull ${coder}' yourself.`,
-    );
-    ok = false;
-  }
-  if (await deps.aiderInstalled()) {
-    out("aider:       installed — /edit runs it dry-run first and applies only on 'go'");
-  } else {
-    err("moss local: aider is not installed; /edit needs it. Run 'brew install aider' yourself.");
-    ok = false;
-  }
+  out("Aider support is deprecated and disabled; local /edit is unavailable.");
   out("");
-  out("Next: moss   (the session — brief, skills as /commands, /edit)");
+  out("Next: moss   (the session — local chat and read-only review skills)");
   return ok;
 }
 
@@ -197,7 +176,7 @@ export function registerEstate(
   program
     .command("local")
     .description(
-      "Tier 3: start Ollama with its context window set; check the chat/coder models and Aider",
+      "Tier 3: start Ollama with its context window set; check local chat models; Aider editing is deprecated",
     )
     .action(async () => {
       const ok = await runLocal(

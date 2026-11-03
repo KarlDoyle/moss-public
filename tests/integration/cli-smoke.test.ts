@@ -1,5 +1,5 @@
 import { execFileSync, execSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -89,6 +89,47 @@ function makeTargetRepoWithDirtyDiff(): string {
 }
 
 describe("CLI integration smoke (no real Ollama, no cloud)", () => {
+  it("piped local /edit refuses deprecated Aider before provider probes or application", () => {
+    const repo = makeTargetRepoWithDirtyDiff();
+    const before = readFileSync(join(repo, "hello.txt"));
+    const index = readFileSync(join(repo, ".git/index"));
+    const guard = join(repo, "no-provider.cjs");
+    writeFileSync(
+      guard,
+      'globalThis.fetch = async () => { throw new Error("Provider probe forbidden in deprecated local edit"); };',
+    );
+    try {
+      const result = spawnSync(
+        TSX_BIN,
+        [CLI_ENTRY, "chat", "--provider", "ollama", "--model", "local-fixture"],
+        {
+          cwd: repo,
+          input: "/edit change hello.txt\n/exit\n",
+          timeout: 30_000,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: pathWithoutClaudeBinary(),
+            TAISCE_ROOT: join(repo, "absent-workspace"),
+            MOSS_NO_OLLAMA_LIFECYCLE: "1",
+            NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require=${guard}`,
+          },
+        },
+      );
+      expect(readFileSync(join(repo, "hello.txt"))).toEqual(before);
+      expect(readFileSync(join(repo, ".git/index"))).toEqual(index);
+      expect(result.status, result.stderr).toBe(1);
+      expect(result.stderr).toContain("Aider support is deprecated and disabled");
+      expect(result.stderr).not.toContain("Provider probe forbidden");
+      expect(result.stdout).not.toContain("go? [y/N]");
+      expect(
+        execFileSync("git", ["diff", "--", "hello.txt"], { cwd: repo, encoding: "utf8" }),
+      ).toContain("+v2");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
   it("global and standalone ask previews use the same parser and manual-provider request", () => {
     const request = [
       "ask",
@@ -107,6 +148,9 @@ describe("CLI integration smoke (no real Ollama, no cloud)", () => {
     expect(globalBody).toEqual(ownBody);
     expect(globalBody.selectedProvider).toBe("cursor-manual");
     expect(globalBody.selectedModel).toBe("packet-fixture");
+  });
+
+  it("global and standalone previews agree for a literal --explain prompt", () => {
     const literalGlobal = runCli(
       [
         "--json",
@@ -138,6 +182,9 @@ describe("CLI integration smoke (no real Ollama, no cloud)", () => {
     );
     const { probedAt: _literalOwnTime, ...literalOwnBody } = JSON.parse(literalOwn.stdout ?? "{}");
     expect(literalGlobalBody).toEqual(literalOwnBody);
+  });
+
+  it("both preview forms reject malformed provider values", () => {
     for (const argv of [
       ["--explain", "ask", "--provider=ollama=bad"],
       ["ask", "--explain", "--provider=ollama=bad"],

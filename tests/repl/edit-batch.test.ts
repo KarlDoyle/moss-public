@@ -8,7 +8,7 @@ import {
 
 const DIFF = "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n";
 
-function setup(lane: EditRoute["lane"] = "ollama") {
+function setup(lane: EditRoute["lane"] = "claude-code") {
   const out: string[] = [];
   const err: string[] = [];
   const onBatchFailure = vi.fn();
@@ -59,6 +59,16 @@ const rejection = async (): Promise<never> => {
 };
 
 describe("edit failure outcomes in piped sessions", () => {
+  it("reports deprecated local edits as batch failure without generation or application", async () => {
+    const s = setup("ollama");
+    await s.run({}, ["/edit change a.txt", "/exit"]);
+    expect(s.err.join("\n")).toContain("deprecated and disabled");
+    expect(s.generate).not.toHaveBeenCalled();
+    expect(s.edit.aider).not.toHaveBeenCalled();
+    expect(s.edit.applyPatch).not.toHaveBeenCalled();
+    expect(s.onBatchFailure).toHaveBeenCalledOnce();
+  });
+
   it.each([false, true])("marks planning failure (throws=%s) at EOF", async (throws) => {
     const s = setup();
     s.generate.mockImplementationOnce(
@@ -70,7 +80,7 @@ describe("edit failure outcomes in piped sessions", () => {
     expect(s.onBatchFailure).toHaveBeenCalledOnce();
   });
 
-  it.each(["ollama", "claude-code"] as const)(
+  it.each(["claude-code", "anthropic-api"] as const)(
     "marks %s apply failure and preserves partial-change diagnosis",
     async (lane) => {
       const s = setup(lane);
@@ -88,20 +98,23 @@ describe("edit failure outcomes in piped sessions", () => {
     },
   );
 
-  it.each(["ollama", "claude-code"] as const)("marks thrown %s apply failure", async (lane) => {
-    const s = setup(lane);
-    await s.run({
-      aider: async (_repo, options) =>
-        options.dryRun ? { exitCode: 0, output: "dry" } : rejection(),
-      applyPatch: async (_repo, _diff, check) => (check ? { ok: true, output: "" } : rejection()),
-    });
-    expect(s.err.join("\n")).toContain("fixture rejection");
-    expect(s.err.join("\n")).toContain("inspect git diff");
-    expect(s.edit.diffStat).not.toHaveBeenCalled();
-    expect(s.onBatchFailure).toHaveBeenCalledOnce();
-  });
+  it.each(["claude-code", "anthropic-api"] as const)(
+    "marks thrown %s apply failure",
+    async (lane) => {
+      const s = setup(lane);
+      await s.run({
+        aider: async (_repo, options) =>
+          options.dryRun ? { exitCode: 0, output: "dry" } : rejection(),
+        applyPatch: async (_repo, _diff, check) => (check ? { ok: true, output: "" } : rejection()),
+      });
+      expect(s.err.join("\n")).toContain("fixture rejection");
+      expect(s.err.join("\n")).toContain("inspect git diff");
+      expect(s.edit.diffStat).not.toHaveBeenCalled();
+      expect(s.onBatchFailure).toHaveBeenCalledOnce();
+    },
+  );
 
-  it.each(["ollama", "claude-code"] as const)(
+  it.each(["claude-code", "anthropic-api"] as const)(
     "marks %s summary failure after a successful apply",
     async (lane) => {
       const s = setup(lane);
@@ -116,15 +129,12 @@ describe("edit failure outcomes in piped sessions", () => {
   it.each([
     ["repo lookup", { resolveRepo: rejection }],
     ["route", { route: rejection }],
-    ["dry run", { aider: async () => ({ exitCode: 7, output: "failed dry run" }) }],
     ["diff generation", { claudeDiff: async () => ({ ok: false, error: "failed diff" }) }],
     ["patch check", { applyPatch: async () => ({ ok: false, output: "failed check" }) }],
   ] satisfies [string, Partial<SessionEditDeps>][])(
     "marks %s failure on /exit",
     async (_label, overrides) => {
-      const s = setup(
-        "claudeDiff" in overrides || "applyPatch" in overrides ? "claude-code" : "ollama",
-      );
+      const s = setup();
       await s.run(overrides, ["/edit change a.txt", "/exit"]);
       expect(s.err.length).toBeGreaterThan(0);
       expect(s.onBatchFailure).toHaveBeenCalledOnce();
@@ -152,7 +162,7 @@ describe("edit failure outcomes in piped sessions", () => {
     expect(s.onBatchFailure).not.toHaveBeenCalled();
   });
 
-  it.each(["ollama", "claude-code"] as const)(
+  it.each(["claude-code", "anthropic-api"] as const)(
     "successful %s edits with accounting warnings remain successful",
     async (lane) => {
       const s = setup(lane);
@@ -169,13 +179,13 @@ describe("edit failure outcomes in piped sessions", () => {
         }),
       });
       expect(s.err).toContain("fixture planning accounting warning");
-      if (lane === "claude-code") expect(s.err).toContain("fixture diff accounting warning");
+      expect(s.err).toContain("fixture diff accounting warning");
       expect(s.out.join("\n")).toContain("Not committed.");
       expect(s.onBatchFailure).not.toHaveBeenCalled();
     },
   );
 
-  it.each(["ollama", "claude-code"] as const)(
+  it.each(["claude-code", "anthropic-api"] as const)(
     "declined and stage-only %s edits remain successful",
     async (lane) => {
       for (const stageOnly of [false, true]) {
@@ -186,8 +196,7 @@ describe("edit failure outcomes in piped sessions", () => {
         ]);
         expect(s.onBatchFailure).not.toHaveBeenCalled();
         expect(s.edit.diffStat).not.toHaveBeenCalled();
-        if (lane === "ollama") expect(s.edit.aider).toHaveBeenCalledOnce();
-        else expect(s.edit.applyPatch).toHaveBeenCalledOnce();
+        expect(s.edit.applyPatch).toHaveBeenCalledOnce();
       }
     },
   );

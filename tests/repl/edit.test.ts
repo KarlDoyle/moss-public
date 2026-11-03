@@ -150,64 +150,19 @@ describe("/edit on a Claude lane", () => {
 });
 
 describe("/edit on the local lane", () => {
-  it("runs Aider architect → editor, dry run then real on go", async () => {
-    const s = setup(local, ["go"]);
-    await runEdit(s.ctx, "set x in a.py");
-    expect(s.aider.mock.calls.map((c) => c[1])).toEqual([
-      {
-        message: "set x to 1",
-        files: ["a.py"],
-        model: "llama3.1:latest",
-        editorModel: "qwen2.5-coder:7b",
-        dryRun: true,
-      },
-      {
-        message: "set x to 1",
-        files: ["a.py"],
-        model: "llama3.1:latest",
-        editorModel: "qwen2.5-coder:7b",
-        dryRun: false,
-      },
-    ]);
-    expect(s.out.join("\n")).toContain("architect llama3.1:latest → editor qwen2.5-coder:7b");
-    expect(s.out.join("\n")).toContain("second generation");
-  });
-
-  it("reports a failed Aider apply as possibly partial and skips normal completion", async () => {
-    const aider = vi.fn(async (_repo: string, options: { dryRun: boolean }) =>
-      options.dryRun
-        ? { exitCode: 0, output: "dry" }
-        : { exitCode: 23, output: "partial edit before failure" },
-    );
-    const diffStat = vi.fn(async () => "unexpected normal summary");
-    const s = setup(local, ["go"], { aider, diffStat });
-    await runEdit(s.ctx, "set x in a.py");
-    expect(s.err.join("\n")).toContain("exited 23 during apply");
-    expect(s.err.join("\n")).toContain("inspect git diff and git status");
-    expect(s.out.join("\n")).not.toContain("Not committed. Read `git diff`");
-    expect(diffStat).not.toHaveBeenCalled();
-  });
-
-  it("reports a thrown Aider apply as possibly partial", async () => {
-    const aider = vi.fn(async (_repo: string, options: { dryRun: boolean }) => {
-      if (options.dryRun) return { exitCode: 0, output: "dry" };
-      throw new Error("controlled timeout");
-    });
-    const diffStat = vi.fn(async () => "unexpected normal summary");
-    const s = setup(local, ["go"], { aider, diffStat });
-    await runEdit(s.ctx, "set x in a.py");
-    expect(s.err.join("\n")).toContain("aider apply failed (controlled timeout)");
-    expect(s.err.join("\n")).toContain("inspect git diff and git status");
-    expect(s.out.join("\n")).not.toContain("Not committed. Read `git diff`");
-    expect(diffStat).not.toHaveBeenCalled();
-  });
-
-  it("stage-only stops after the dry run", async () => {
-    const s = setup({ ...local, stageOnly: true }, ["y"]);
-    await runEdit(s.ctx, "set x in a.py");
-    expect(s.aider).toHaveBeenCalledTimes(1);
-    expect(s.out.join("\n")).toContain("STAGE-ONLY");
-  });
+  it.each([false, true])(
+    "refuses deprecated local editing before planning (stageOnly=%s)",
+    async (stageOnly) => {
+      const s = setup({ ...local, stageOnly }, ["go"]);
+      expect(await runEdit(s.ctx, "set x in a.py")).toBe(false);
+      expect(s.err.join("\n")).toContain("Aider support is deprecated and disabled");
+      expect(s.generate).not.toHaveBeenCalled();
+      expect(s.aider).not.toHaveBeenCalled();
+      expect(s.claudeDiff).not.toHaveBeenCalled();
+      expect(s.applyPatch).not.toHaveBeenCalled();
+      expect(s.out.join("\n")).not.toContain("go?");
+    },
+  );
 
   it("reports no lane at all", async () => {
     const s = setup({ lane: null, model: null, stageOnly: false, summary: "· ollama: down" }, []);

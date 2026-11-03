@@ -107,8 +107,27 @@ describe("moss local", () => {
     expect(text).toContain("ollama already running");
     expect(text).toContain("chat model:  qwen2.5-coder:7b, llama3.1:latest");
     expect(text).not.toMatch(/chat model:.*qwen3/);
-    expect(text).toContain("coder model: qwen2.5-coder:7b — /edit is ready");
+    expect(text).toContain("Aider support is deprecated and disabled");
     expect(text).toContain("Next: moss");
+  });
+
+  it("needs neither Aider nor a coder model for local chat and never probes Aider", async () => {
+    const aiderInstalled = vi.fn(async () => {
+      throw new Error("must not probe");
+    });
+    const d = deps({
+      report: async () =>
+        report({ ollama: { reachable: true, models: [{ name: "llama3.1:latest" }] } }),
+      aiderInstalled,
+    });
+    expect(
+      await runLocal(
+        () => undefined,
+        () => undefined,
+        d,
+      ),
+    ).toBe(true);
+    expect(aiderInstalled).not.toHaveBeenCalled();
   });
 
   it("starts ollama with the context length set, then waits for it", async () => {
@@ -158,8 +177,7 @@ describe("moss local", () => {
     ).toBe(false);
     const text = err.join("\n");
     expect(text).toContain("no non-reasoning model is pulled");
-    expect(text).toContain("ollama pull qwen2.5-coder:7b");
-    expect(text).toContain("brew install aider");
+    expect(text).not.toContain("brew install aider");
   });
 
   it("reports a failed daemon start", async () => {

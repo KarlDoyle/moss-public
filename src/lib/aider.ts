@@ -1,21 +1,7 @@
-// Aider — the edit engine under `/edit`. moss plans, Aider edits, the operator approves.
-//
-// Aider writes files by default, and `--no-auto-commits` does NOT stop it: on 2026-09-18 one
-// read-only-looking drill prompt cut a 520-line Taisce file to 5 (Taisce
-// System/CONTINUITY.md, drill results). So the only shapes built here are:
-//
-//   dry run  — `--dry-run`: prints the would-be diff, touches nothing.
-//   apply    — `--no-dry-run`: only after the operator typed "go" at the session prompt.
-//
-// The configured flags disable known automatic actions such as shell suggestions,
-// URL detection, auto-lint, .gitignore edits, and commits. They do not sandbox the
-// child process or prove it reads/writes only the selected files. Moss canonicalizes
-// those paths immediately before handoff; Aider's complete behavior remains unverified.
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { run } from "./exec.ts";
-import { OLLAMA_BASE_URL } from "./ollama.ts";
+// Deprecated Aider compatibility helpers. Production execution is disabled.
+// Pure planning/parsing helpers are also used by hosted patch editing.
+import { realpathSync, statSync } from "node:fs";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 
 export class AiderFileScopeError extends Error {
   constructor(file: string, reason: string) {
@@ -24,8 +10,7 @@ export class AiderFileScopeError extends Error {
   }
 }
 
-// A local 7B model through Aider: ~11s for a one-file edit measured 2026-09-18, but a big
-// file at ~20 tok/s takes minutes. Ten minutes, and nothing is billed while it waits.
+/** @deprecated Historical adapter constant; production Aider execution is disabled. */
 export const AIDER_TIMEOUT_MS = 600_000;
 
 export interface AiderRunOptions {
@@ -132,57 +117,16 @@ export async function runAiderConfined(
   return runner(args, root);
 }
 
-export const defaultAiderRunner: AiderRunner = async (args, cwd) => {
-  const privateHome = mkdtempSync(join(tmpdir(), "moss-aider-home-"));
-  const configHome = join(privateHome, "config");
-  const cacheHome = join(privateHome, "cache");
-  const dataHome = join(privateHome, "data");
-  const inherited = Object.keys(process.env);
-  const retained = new Set([
-    "PATH",
-    "HOME",
-    "TMPDIR",
-    "XDG_CONFIG_HOME",
-    "XDG_CACHE_HOME",
-    "XDG_DATA_HOME",
-    "OLLAMA_API_BASE",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "TERM",
-  ]);
-  try {
-    mkdirSync(configHome);
-    mkdirSync(cacheHome);
-    mkdirSync(dataHome);
-    const result = await run("aider", args, {
-      cwd,
-      timeoutMs: AIDER_TIMEOUT_MS,
-      allowFailure: true,
-      env: {
-        PATH: process.env.PATH ?? "",
-        HOME: privateHome,
-        TMPDIR: privateHome,
-        XDG_CONFIG_HOME: configHome,
-        XDG_CACHE_HOME: cacheHome,
-        XDG_DATA_HOME: dataHome,
-        OLLAMA_API_BASE: OLLAMA_BASE_URL,
-        ...(process.env.LANG !== undefined ? { LANG: process.env.LANG } : {}),
-        ...(process.env.LC_ALL !== undefined ? { LC_ALL: process.env.LC_ALL } : {}),
-        ...(process.env.LC_CTYPE !== undefined ? { LC_CTYPE: process.env.LC_CTYPE } : {}),
-        ...(process.env.TERM !== undefined ? { TERM: process.env.TERM } : {}),
-      },
-      unsetEnv: inherited.filter((key) => !retained.has(key)),
-    });
-    const output = [result.stdout, result.stderr].filter((s) => s.trim().length > 0).join("\n");
-    return { exitCode: result.exitCode, output };
-  } finally {
-    rmSync(privateHome, { recursive: true, force: true });
-  }
+/** @deprecated Aider execution is disabled; retained only to reject legacy callers clearly. */
+export const AIDER_DEPRECATION =
+  "Aider support is deprecated and disabled. Local /edit is unavailable. Local chat and read-only reviews remain available. To use experimental hosted patch edits, explicitly select /provider claude-code or /provider anthropic-api; hosted calls send context off-device and API eligibility checks still apply.";
+
+export const defaultAiderRunner: AiderRunner = async () => {
+  throw new Error(AIDER_DEPRECATION);
 };
 
 // Aider's banner and token lines are noise next to the diff; the "Did not apply edit"
-// line is kept because it is the proof nothing was written.
+// line is retained as historical output, not proof of filesystem integrity.
 const NOISE = [
   /^Warning: Input is not a terminal/,
   /^Aider v\d/,
@@ -221,10 +165,10 @@ export function pickFiles(text: string, tracked: readonly string[], max = 6): st
 }
 
 // The prompt the chat model plans with. It must name files from the list and say what to
-// change in one paragraph — that paragraph is what Aider receives verbatim.
+// change in one paragraph for the subsequent hosted text-patch proposal.
 export function buildEditPlanPrompt(ask: string, tracked: readonly string[]): string {
   return [
-    "You are planning a code or text edit that another tool (Aider) will make.",
+    "You are planning a code or text edit that will be proposed as a reviewed text patch.",
     "Reply in exactly this shape and nothing else:",
     "FILES: <comma-separated paths, copied exactly from the list below, at most 4>",
     "PLAN: <one paragraph: what to change in each file, concrete enough to do without asking>",

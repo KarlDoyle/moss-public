@@ -10,7 +10,7 @@ import { type FetchResult, NetworkBoundaryError, safeFetch } from "../lib/net.ts
 import { resolveTaisceRoot as defaultResolveTaisceRoot, getProjectRoot } from "../lib/paths.ts";
 
 const OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags";
-const MIN_NODE_MAJOR = 22;
+const MIN_NODE_MAJOR = 24;
 
 export interface DoctorDependencies {
   readonly execRun: (

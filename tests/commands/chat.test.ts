@@ -484,7 +484,7 @@ describe("the Taisce session", () => {
   });
 });
 
-describe("/edit — plan, dry-run diff, go?, apply, diff --stat", () => {
+describe("/edit — hosted plan, checked diff, go?, apply, diff --stat", () => {
   function editDeps(overrides: Partial<SessionEditDeps> = {}) {
     const aider = vi.fn(async (_repo: string, o: { dryRun: boolean }) => ({
       exitCode: 0,
@@ -501,19 +501,30 @@ describe("/edit — plan, dry-run diff, go?, apply, diff --stat", () => {
       buildPlanPrompt: (ask) => `PLAN FOR ${ask}`,
       parsePlan: (text) => ({ files: "calc.py", plan: text }),
       pickFiles: (text, tracked) => tracked.filter((f) => text.includes(f)),
+      route: async () => ({
+        lane: "claude-code",
+        model: "sonnet",
+        stageOnly: false,
+        summary: "fixture hosted",
+      }),
+      claudeDiff: async () => ({
+        ok: true,
+        diff: "--- a/calc.py\n+++ b/calc.py\n@@ -1 +1 @@\n-old\n+new\n",
+      }),
+      applyPatch: vi.fn(async () => ({ ok: true, output: "" })),
       ...overrides,
     };
-    return { deps, aider, diffStat };
+    return { deps, aider, diffStat, applyPatch: deps.applyPatch as ReturnType<typeof vi.fn> };
   }
 
   it("stops at go? and writes nothing on anything but yes", async () => {
-    const { deps, aider, diffStat } = editDeps();
+    const { deps, applyPatch, diffStat } = editDeps();
     const h = harness(["/edit add sub to calc.py", "n", "/exit"], echo, taisce({ edit: deps }));
     await runChatSession(h.deps);
-    expect(aider).toHaveBeenCalledTimes(1);
-    expect(aider.mock.calls[0]?.[1]).toMatchObject({ dryRun: true, files: ["calc.py"] });
+    expect(applyPatch).toHaveBeenCalledTimes(1);
+    expect(applyPatch.mock.calls[0]?.[2]).toBe(true);
     const text = h.out.join("\n");
-    expect(text).toContain("Did not apply edit (--dry-run)");
+    expect(text).toContain("+new");
     expect(text).toContain("go? [y/N]");
     expect(text).toContain("not applied. No target patch was applied.");
     expect(diffStat).not.toHaveBeenCalled();
@@ -522,18 +533,18 @@ describe("/edit — plan, dry-run diff, go?, apply, diff --stat", () => {
   });
 
   it("EOF at go? is a no", async () => {
-    const { deps, aider } = editDeps();
+    const { deps, applyPatch } = editDeps();
     const h = harness(["/edit add sub to calc.py"], echo, taisce({ edit: deps }));
     await runChatSession(h.deps);
-    expect(aider).toHaveBeenCalledTimes(1);
+    expect(applyPatch).toHaveBeenCalledTimes(1);
   });
 
-  it("on go, applies without --dry-run and prints git diff --stat — never commits", async () => {
-    const { deps, aider, diffStat } = editDeps();
+  it("on go, applies the checked patch and prints git diff --stat — never commits", async () => {
+    const { deps, applyPatch, diffStat } = editDeps();
     const h = harness(["/edit add sub to calc.py", "go", "/exit"], echo, taisce({ edit: deps }));
     await runChatSession(h.deps);
-    expect(aider).toHaveBeenCalledTimes(2);
-    expect(aider.mock.calls[1]?.[1]).toMatchObject({ dryRun: false });
+    expect(applyPatch).toHaveBeenCalledTimes(2);
+    expect(applyPatch.mock.calls[1]?.[2]).toBe(false);
     expect(diffStat).toHaveBeenCalledWith("/repo");
     const text = h.out.join("\n");
     expect(text).toContain("calc.py | 3 +++");
@@ -548,7 +559,7 @@ describe("/edit — plan, dry-run diff, go?, apply, diff --stat", () => {
     expect(aider).not.toHaveBeenCalled();
   });
 
-  it("refuses a sensitivity-gated file before Aider ever sees it", async () => {
+  it("refuses a sensitivity-gated file before proposing a patch", async () => {
     const { deps, aider } = editDeps({
       checkFiles: () => {
         throw new Error("Blocked by guard-reads: 'Projects/home-reset/x.md'");
@@ -560,11 +571,11 @@ describe("/edit — plan, dry-run diff, go?, apply, diff --stat", () => {
     expect(aider).not.toHaveBeenCalled();
   });
 
-  it("does not ask go? when the dry run fails", async () => {
-    const { deps } = editDeps({ aider: vi.fn(async () => ({ exitCode: 1, output: "boom" })) });
+  it("does not ask go? when patch validation fails", async () => {
+    const { deps } = editDeps({ applyPatch: vi.fn(async () => ({ ok: false, output: "boom" })) });
     const h = harness(["/edit fix calc.py", "/exit"], echo, taisce({ edit: deps }));
     await runChatSession(h.deps);
-    expect(h.err.join("\n")).toContain("nothing was applied");
+    expect(h.err.join("\n")).toContain("nothing applied");
     expect(h.out.join("\n")).not.toContain("go?");
   });
 

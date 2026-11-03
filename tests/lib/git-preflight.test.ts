@@ -82,15 +82,16 @@ describe("effective Git preflight", () => {
         () => gitTrackedFiles(repo),
         () =>
           gitApply(repo, "--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-dirty\n+new\n", true, ["f.txt"]),
-        () =>
-          buildTaisceSessionDeps(join(root, "absent-workspace")).edit?.aider(repo, {
-            message: "fixture",
-            files: ["f.txt"],
-            dryRun: true,
-          }),
       ]) {
         await expect(operation()).rejects.toThrow("effective config defines");
       }
+      await expect(
+        buildTaisceSessionDeps(join(root, "absent-workspace")).edit?.aider(repo, {
+          message: "fixture",
+          files: ["f.txt"],
+          dryRun: true,
+        }),
+      ).rejects.toThrow("deprecated and disabled");
       expect(dangerous).not.toHaveBeenCalled();
       expect(readFileSync(join(repo, "f.txt"))).toEqual(bytes);
       expect(readFileSync(join(repo, ".git/index"))).toEqual(index);
